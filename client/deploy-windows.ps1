@@ -1,28 +1,26 @@
 <#
 .SYNOPSIS
-    一键在外机部署 SSH client 配置,使其能通过 VPS + FRP 连接到本机 Win11。
+    一键在外机部署 SSH client,使其能通过 VPS + FRP 连接到本机 Win11。
 
 .DESCRIPTION
-    交互式脚本:
+    交互式脚本(密码认证,不需要私钥):
       1. 检查/安装 OpenSSH Client
-      2. 提示直接粘贴私钥内容(无需先存文件),写到 ~/.ssh/id_ed25519
-      3. 写 ~/.ssh/config(含 FRP VPS 地址 + 用户名)
-      4. 创建 PowerShell profile alias
+      2. 写 ~/.ssh/config(FRP VPS 地址 + 用户名)
+      3. 创建 PowerShell profile alias
 
-    不含任何硬编码的私钥 / 密码。私钥通过终端粘贴,落地到本地 ~/.ssh/。
+    主机侧要求:本机 sshd 已开 PasswordAuthentication yes。
+    外机连时每次输 Win11 账号密码。
 
 .PARAMETER VpsHost
     VPS 公网 IP 或域名(FRPS 所在)
 .PARAMETER SshPort
     FRP 上 SSH 转发的端口(默认 6000)
 .PARAMETER LocalUser
-    本机 Win11 的 SSH 用户名(连过去登录用的)
-.PARAMETER KeyName
-    私钥写入文件名(默认 id_ed25519)
+    本机 Win11 的账号用户名
 
 .EXAMPLE
     .\deploy-windows.ps1
-    # 提示输入 VPS / 用户名 / 私钥(粘贴多行内容,以单独一行的 END 结束)
+    # 提示输入 VPS / 用户名
 
 .EXAMPLE
     .\deploy-windows.ps1 -VpsHost 8.163.106.31 -LocalUser WuKong
@@ -32,88 +30,44 @@
 param(
     [string]$VpsHost,
     [int]$SshPort = 6000,
-    [string]$LocalUser,
-    [string]$KeyName = 'id_ed25519'
+    [string]$LocalUser
 )
 
 $ErrorActionPreference = 'Stop'
 $sshDir = "$env:USERPROFILE\.ssh"
 $cfg = "$sshDir\config"
-$keyPath = Join-Path $sshDir $KeyName
 
 function Write-Step($n, $msg) {
     Write-Host ""
-    Write-Host "[$n] $msg" -ForegroundColor Cyan
+    Write-Host "[$n/3] $msg" -ForegroundColor Cyan
 }
 
-# ---------- 0. 交互式收集缺失参数 ----------
+# ---------- 0. 交互式收集 ----------
 if (-not $VpsHost) {
     $VpsHost = Read-Host "VPS 公网 IP 或域名(FRPS 所在)"
+    if (-not $VpsHost) { $VpsHost = '8.163.106.31' }
 }
 if (-not $LocalUser) {
-    $LocalUser = Read-Host "本机 Win11 的 SSH 用户名"
+    $LocalUser = Read-Host "本机 Win11 的账号用户名(例如 WuKong)"
 }
 
-# ---------- 1. 检查 OpenSSH Client ----------
-Write-Step "1/5" "检查 OpenSSH Client..."
-$clientCapable = (Get-WindowsCapability -Online -Name "OpenSSH.Client*" -ErrorAction SilentlyContinue) | Where-Object State -eq "Installed"
-if (-not $clientCapable) {
-    Write-Host "OpenSSH Client 未安装,正在安装..."
-    Add-WindowsCapability -Online -Name "OpenSSH.Client~~~~0.0.1.0"
+# ---------- 1. OpenSSH Client ----------
+Write-Step "1/3" "检查 OpenSSH Client..."
+$cap = (Get-WindowsCapability -Online -Name "OpenSSH.Client*" -ErrorAction SilentlyContinue) | Where-Object State -eq "Installed"
+if (-not $cap) {
+    Write-Host "正在安装 OpenSSH Client..."
+    Add-WindowsCapability -Online -Name "OpenSSH.Client~~~~0.0.1.0" | Out-Null
 } else {
     Write-Host "OpenSSH Client 已安装。"
 }
 if (-not (Get-Command ssh -ErrorAction SilentlyContinue)) {
-    Write-Error "安装后仍找不到 ssh 命令,需要重启 PowerShell 或检查 PATH"
+    Write-Error "安装后仍找不到 ssh。重启 PowerShell 再试。"
 }
 
-# ---------- 2. 准备 ~/.ssh 目录 ----------
-Write-Step "2/5" "准备 $sshDir"
-if (-not (Test-Path $sshDir)) {
-    New-Item -ItemType Directory -Path $sshDir -Force | Out-Null
-}
+if (-not (Test-Path $sshDir)) { New-Item -ItemType Directory -Path $sshDir -Force | Out-Null }
 
-# ---------- 3. 直接粘贴 PEM 私钥内容(多行,以单独一行 END 结束) ----------
-Write-Step "3/5" "粘贴私钥 PEM 内容"
-Write-Host "  从主控机的 id_ed25519 文件复制(包含 BEGIN 和 END 行)"
-Write-Host "  完成后单独输一行 END 结束"
-Write-Host ""
-
-$keyLines = @()
-while ($true) {
-    Write-Host "  > " -NoNewline
-    $line = [Console]::In.ReadLine()
-    if ([string]::IsNullOrEmpty($line)) { continue }
-    if ($line.Trim() -eq 'END') { break }
-    $keyLines += $line
-}
-$keyContent = ($keyLines -join "`n")
-
-# 校验:必须含 BEGIN/END
-if ($keyContent -notmatch '-----BEGIN .* PRIVATE KEY-----') {
-    Write-Error "没看到 BEGIN 标记。检查是否复制完整。"
-}
-if ($keyContent -notmatch '-----END .* PRIVATE KEY-----') {
-    Write-Error "没看到 END 标记。检查是否复制完整。"
-}
-
-[System.IO.File]::WriteAllText($keyPath, $keyContent, [System.Text.UTF8Encoding]::new($false))
-icacls $keyPath /inheritance:r /grant:r "${env:USERNAME}:(R)" | Out-Null
-Write-Host "已写 $keyPath"
-
-# ---------- 4. 校验私钥 + 写 ~/.ssh/config ----------
-Write-Step "4/5" "校验私钥 + 写 ssh config"
-$tmpPub = Join-Path $env:TEMP "verify_pub.txt"
-$proc = Start-Process -FilePath 'ssh-keygen' -ArgumentList @('-y','-f',$keyPath,'-P','""') `
-    -NoNewWindow -Wait -RedirectStandardOutput $tmpPub -RedirectStandardError "$tmpPub.err" -PassThru
-if ($proc.ExitCode -ne 0) {
-    Write-Warning "私钥校验失败(可能带 passphrase)。首次连接 ssh 会要求输入。"
-} else {
-    Write-Host "私钥 OK,公钥指纹:"
-    Get-Content $tmpPub
-}
-Remove-Item $tmpPub,"$tmpPub.err" -ErrorAction SilentlyContinue
-
+# ---------- 2. 写 ssh config ----------
+Write-Step "2/3" "写入 $cfg"
 $block = @"
 
 # ===== ssh-deploy: 通过 FRP 连回本机 Win11 =====
@@ -121,8 +75,8 @@ Host wukong-pc
     HostName $VpsHost
     Port $SshPort
     User $LocalUser
-    IdentityFile $keyPath
-    IdentitiesOnly yes
+    PreferredAuthentications password
+    PubkeyAuthentication no
     StrictHostKeyChecking accept-new
     ServerAliveInterval 30
     ServerAliveCountMax 3
@@ -132,19 +86,19 @@ Host wukong-pc
 if (-not (Test-Path $cfg)) { New-Item -ItemType File -Path $cfg -Force | Out-Null }
 Add-Content -Path $cfg -Value $block -Encoding UTF8
 
-# ---------- 5. 创建 PowerShell alias ----------
-Write-Step "5/5" "创建 PowerShell alias"
+# ---------- 3. alias ----------
+Write-Step "3/3" "配置 PowerShell alias"
 $profileDir = Split-Path $PROFILE -Parent
 if (-not (Test-Path $profileDir)) { New-Item -ItemType Directory -Path $profileDir -Force | Out-Null }
 if (-not (Test-Path $PROFILE)) { New-Item -ItemType File -Path $PROFILE -Force | Out-Null }
-$aliasLine = "function wukong { ssh wukong-pc }`nSet-Alias -Name wpc -Value wukong`n"
 if (-not (Select-String -Path $PROFILE -Pattern 'function wukong' -SimpleMatch -Quiet)) {
-    Add-Content -Path $PROFILE -Value "`n# ssh-deploy alias`n$aliasLine" -Encoding UTF8
+    Add-Content -Path $PROFILE -Value "`n# ssh-deploy alias`nfunction wukong { ssh wukong-pc }`nSet-Alias -Name wpc -Value wukong`n" -Encoding UTF8
 }
 
 Write-Host ""
 Write-Host "============================================" -ForegroundColor Green
 Write-Host "部署完成!" -ForegroundColor Green
-Write-Host "  重启 PowerShell 后输: ssh wukong-pc  或  wpc" -ForegroundColor Green
-Write-Host "  首次会确认 host key,输 yes 后即可登录。" -ForegroundColor Green
+Write-Host "  重启 PowerShell 后输: ssh wukong-pc" -ForegroundColor Green
+Write-Host "  首次会确认 host key (输 yes)" -ForegroundColor Green
+Write-Host "  然后提示输 Win11 账号密码(每次连都要输)" -ForegroundColor Green
 Write-Host "============================================" -ForegroundColor Green
