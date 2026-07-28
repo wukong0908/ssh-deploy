@@ -1,0 +1,14 @@
+# 严禁提交任何私钥、密码、敏感配置
+secrets/
+*.pem
+*.key
+*.ppk
+id_*
+authorized_keys
+known_hosts
+config.local
+
+# 临时文件
+*.tmp
+*.bak
+__pycache__/

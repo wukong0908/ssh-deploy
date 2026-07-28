@@ -1,0 +1,13 @@
+# ssh_config 模板 — 手动复制到 ~/.ssh/config 时用
+# 把 ${VAR} 替换成实际值,或者用 client/deploy-*.{ps1,sh} 自动生成。
+
+Host wukong-pc
+    HostName ${VPS_HOST}            # VPS 公网 IP 或域名(FRPS 所在)
+    Port ${SSH_PORT}                # FRP 上 SSH 转发端口(默认 6000)
+    User ${LOCAL_USER}              # 本机 Win11 的 SSH 用户名
+    IdentityFile ${KEY_PATH}        # 私钥路径
+    IdentitiesOnly yes
+    StrictHostKeyChecking accept-new
+    ServerAliveInterval 30
+    ServerAliveCountMax 3
+    Compression yes
