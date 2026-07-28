@@ -42,12 +42,15 @@ KEY_PATH="$HOME/.ssh/$KEY_NAME"
 echo "[3/5] 粘贴私钥内容(从 -----BEGIN ... PRIVATE KEY----- 到 -----END ... PRIVATE KEY-----)"
 echo "       完成后单独输一行 END 结束"
 KEY_CONTENT=""
-while IFS= read -r line; do
+# 从 /dev/tty 直接读,不被 curl 管道/stdin 关闭影响
+exec 3</dev/tty 2>/dev/null || exec 3<&0
+while IFS= read -r line <&3; do
     if [ "$line" = "END" ]; then
         break
     fi
     KEY_CONTENT="${KEY_CONTENT}${line}"$'\n'
 done
+exec 3<&- 2>/dev/null || true
 
 if ! echo "$KEY_CONTENT" | grep -q "-----BEGIN .* PRIVATE KEY-----"; then
     echo "❌ 没看到 BEGIN 标记,输入有误"

@@ -76,9 +76,12 @@ if (-not (Test-Path $sshDir)) {
 # ---------- 3. 直接粘贴私钥(以单独一行 END 结束) ----------
 Write-Step "3/5" "粘贴私钥内容(从 -----BEGIN ... PRIVATE KEY----- 到 -----END ... PRIVATE KEY-----,以单独一行 END 结束)"
 $keyLines = @()
+# 用 [Console]::In.ReadLine() 直接读 console,不被 iex/管道劫持
 while ($true) {
-    $line = Read-Host
-    if ($line -eq 'END') { break }
+    Write-Host "  > " -NoNewline
+    $line = [Console]::In.ReadLine()
+    if ([string]::IsNullOrEmpty($line)) { continue }
+    if ($line.Trim() -eq 'END') { break }
     $keyLines += $line
 }
 $keyContent = ($keyLines -join "`n")
