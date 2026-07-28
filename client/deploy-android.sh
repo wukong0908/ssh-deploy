@@ -8,23 +8,37 @@ DEFAULT_VPS="8.163.106.31"
 DEFAULT_PORT=6000
 DEFAULT_USER="WuKong"
 
+step() {
+    echo ""
+    echo "[$1/3] $2"
+}
+
 # ---------- 0. Termux 检查 ----------
 if [ ! -d "/data/data/com.termux" ]; then
     echo "❌ 这个脚本必须在 Termux 里跑。"
     exit 1
 fi
 
-# ---------- 1. 装 openssh / git ----------
-echo "[1/4] 安装 openssh / git..."
-pkg update -y >/dev/null 2>&1 || true
-pkg install -y openssh git
+# ---------- 1. OpenSSH Client ----------
+step "1/3" "检查 openssh / git..."
+if ! command -v ssh >/dev/null 2>&1; then
+    echo "正在安装 openssh..."
+    pkg update -y >/dev/null 2>&1 || true
+    pkg install -y openssh git
+else
+    echo "openssh 已安装。"
+fi
+if ! command -v ssh >/dev/null 2>&1; then
+    echo "❌ 安装后仍找不到 ssh。重启 Termux 再试。"
+    exit 1
+fi
 
-# ---------- 2. 准备 ~/.ssh ----------
-echo "[2/4] 准备 ~/.ssh"
-mkdir -p "$HOME/.ssh"
-chmod 700 "$HOME/.ssh"
+SSH_DIR="$HOME/.ssh"
+mkdir -p "$SSH_DIR"
+chmod 700 "$SSH_DIR"
 
-# ---------- 3. 交互收集(读不到时 fallback 默认) ----------
+# ---------- 2. 收集参数 ----------
+step "2/3" "收集连接参数"
 if [ -t 0 ]; then
     printf "VPS 公网 IP 或域名 [%s]: " "$DEFAULT_VPS"; read -r VPS_HOST
     printf "FRP 转发的 SSH 端口 [%s]: " "$DEFAULT_PORT"; read -r SSH_PORT
@@ -33,16 +47,18 @@ fi
 VPS_HOST=${VPS_HOST:-$DEFAULT_VPS}
 SSH_PORT=${SSH_PORT:-$DEFAULT_PORT}
 LOCAL_USER=${LOCAL_USER:-$DEFAULT_USER}
+if [ -z "$LOCAL_USER" ]; then
+    echo "❌ 用户名不能为空,脚本退出"
+    exit 1
+fi
 
-echo "→ VPS=$VPS_HOST  PORT=$SSH_PORT  USER=$LOCAL_USER"
-
-# ---------- 4. 写 ssh config + alias ----------
-echo "[3/4] 写 ~/.ssh/config"
-CONFIG="$HOME/.ssh/config"
+# ---------- 3. 写 config + alias ----------
+step "3/3" "写入 ~/.ssh/config 和 bash alias"
+CONFIG="$SSH_DIR/config"
 touch "$CONFIG"
 chmod 600 "$CONFIG"
 
-if ! grep -q "Host wukong-pc" "$CONFIG" 2>/dev/null; then
+if ! grep -q "^Host wukong-pc$" "$CONFIG" 2>/dev/null; then
     cat >> "$CONFIG" <<EOF
 
 # ===== ssh-deploy: 通过 FRP 连回本机 Win11 =====
@@ -58,19 +74,22 @@ Host wukong-pc
     Compression yes
 # ===== END ssh-deploy =====
 EOF
+    echo "config 已写入 wukong-pc 段"
 else
-    echo "config 里已有 wukong-pc 段,跳过"
+    echo "config 已有 wukong-pc 段,跳过"
 fi
 
-echo "[4/4] 配置 bash alias"
 BASHRC="$HOME/.bashrc"
 touch "$BASHRC"
-if ! grep -q "alias wpc=" "$BASHRC" 2>/dev/null; then
+if ! grep -q "^alias wpc=" "$BASHRC" 2>/dev/null; then
     cat >> "$BASHRC" <<'EOF'
 
 # ssh-deploy alias
 alias wpc='ssh wukong-pc'
 EOF
+    echo "alias wpc 已写入 ~/.bashrc"
+else
+    echo "alias wpc 已存在,跳过"
 fi
 
 echo ""
