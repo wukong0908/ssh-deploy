@@ -100,7 +100,7 @@ if (-not $LocalUser) {
 
 function Write-Step($n, $msg) {
     Write-Host ""
-    Write-Host "[$n/5] $msg" -ForegroundColor Cyan
+    Write-Host "[$n] $msg" -ForegroundColor Cyan
 }
 
 # ---------- 1. OpenSSH Server ----------
@@ -115,29 +115,40 @@ if (-not $serverCap -and -not (Test-Path $sshdExe)) {
     if ($winsxsDirs) {
         $src = $winsxsDirs[0].FullName
         Write-Host "从 WinSxS 离线装 OpenSSH Server...($src)" -ForegroundColor Cyan
+
+        # System32\OpenSSH 写入需 SYSTEM — 走 schtasks 临时任务 + cmd copy
         $dest = "$env:SystemRoot\System32\OpenSSH"
-        if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest -Force | Out-Null }
-        # 拷二进制
-        Copy-Item -Path "$src\*" -Destination $dest -Recurse -Force
-        # 设 ACL(等同 capability 安装结果)
-        icacls $dest /inheritance:r /grant "SYSTEM:(R)" "Administrators:(R)" "Users:(RX)" | Out-Null
-        icacls "$dest\sshd.exe" /inheritance:r /grant "SYSTEM:(RX)" "Administrators:(RX)" | Out-Null
-        # 注册 sshd 服务(Win 默认参数)
-        $binPath = "$dest\sshd.exe"
-        $existing = Get-Service sshd -ErrorAction SilentlyContinue
-        if (-not $existing) {
-            sc.exe create sshd binPath= "`"$binPath`"" DisplayName= "OpenSSH SSH Server" start= auto | Out-Null
-            sc.exe failure sshd reset= 60 actions= restart/5000 | Out-Null
-        }
-        # 拷 sshd_config 默认(若 ProgramData 下还没)
-        if (-not (Test-Path 'C:\ProgramData\ssh\sshd_config') -and (Test-Path "$src\sshd_config_default")) {
-            New-Item -ItemType Directory -Path 'C:\ProgramData\ssh' -Force | Out-Null
-            Copy-Item "$src\sshd_config_default" 'C:\ProgramData\ssh\sshd_config' -Force
-        }
-        # 生成 host keys(若不存在)
-        if (-not (Test-Path 'C:\ProgramData\ssh\ssh_host_ed25519_key')) {
-            & "$dest\ssh-keygen.exe" -A 2>&1 | Out-Null
-        }
+        $logPath = "$env:TEMP\winsxs_install_log.txt"
+        $tmpBat = "$env:TEMP\winsxs_install.bat"
+
+        $writeScript = @"
+@echo off
+setlocal
+chcp 65001 >nul
+set LOG=$logPath
+echo START %date% %time% > "%LOG%"
+if not exist "$dest" mkdir "$dest" >> "%LOG%" 2>&1
+xcopy /Y /E /I "$src\*" "$dest\" >> "%LOG%" 2>&1
+echo xcopy exit=%errorlevel% >> "%LOG%"
+icacls "$dest" /inheritance:r /grant "SYSTEM:(R)" "Administrators:(R)" "Users:(RX)" >> "%LOG%" 2>&1
+icacls "$dest\sshd.exe" /inheritance:r /grant "SYSTEM:(RX)" "Administrators:(RX)" >> "%LOG%" 2>&1
+if not exist "C:\ProgramData\ssh" mkdir "C:\ProgramData\ssh" >> "%LOG%" 2>&1
+if exist "$src\sshd_config_default" copy /Y "$src\sshd_config_default" "C:\ProgramData\ssh\sshd_config" >> "%LOG%" 2>&1
+"C:\Windows\System32\OpenSSH\ssh-keygen.exe" -A >> "%LOG%" 2>&1
+sc create sshd binPath= "\"$dest\sshd.exe\"" DisplayName= "OpenSSH SSH Server" start= auto >> "%LOG%" 2>&1
+sc failure sshd reset= 60 actions= restart/5000 >> "%LOG%" 2>&1
+echo END >> "%LOG%"
+endlocal
+"@
+        [System.IO.File]::WriteAllText($tmpBat, $writeScript, [System.Text.UTF8Encoding]::new($false))
+        $startTime = (Get-Date).AddMinutes(1).ToString('HH:mm')
+        $taskName = "WinsxsInstall_$((Get-Date).Ticks)"
+        schtasks /Create /TN $taskName /SC ONCE /ST $startTime /RU SYSTEM /RL HIGHEST /TR "cmd.exe /c `"$tmpBat`"" /F | Out-Null
+        schtasks /Run /TN $taskName | Out-Null
+        Start-Sleep -Seconds 15
+        schtasks /Delete /TN $taskName /F | Out-Null
+        Get-Content $logPath
+        Remove-Item $tmpBat -Force -ErrorAction SilentlyContinue
         Write-Host "✅ WinSxS 离线装完成" -ForegroundColor Green
     } else {
         # 路径 2:Windows Update(慢)
@@ -265,7 +276,7 @@ remote_port = $FrpSshPort
     if ($existing) {
         Unregister-ScheduledTask -TaskName $schTaskName -Confirm:$false
     }
-    $action = New-ScheduledTaskAction -Execute $frpcExe -Argument '-c', $iniPath
+    $action = New-ScheduledTaskAction -Execute $frpcExe -Argument "-c `"$iniPath`""
     $trigger = New-ScheduledTaskTrigger -AtLogOn
     $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
