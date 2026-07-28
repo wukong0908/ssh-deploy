@@ -39,24 +39,25 @@ read -rp "私钥文件名 [${DEFAULT_KEY_NAME}]: " KEY_NAME
 KEY_NAME=${KEY_NAME:-$DEFAULT_KEY_NAME}
 KEY_PATH="$HOME/.ssh/$KEY_NAME"
 
-# ---------- 4. 粘贴私钥(base64 编码,一次性读,不分行) ----------
+# ---------- 4. 粘贴私钥(base64,单行) ----------
 cat <<'TIP'
 
-[3/5] 现在粘贴私钥的 base64 编码(单行,不分行)
-       在主控端机跑:    base64 -w0 ~/.ssh/id_ed25519
-       或 Win PowerShell: [Convert]::ToBase64String([IO.File]::ReadAllBytes("$HOME\.ssh\id_ed25519"))
-       得到一长串字符,粘贴进来,以单独一行 END 结束
+[3/5] 现在粘贴私钥的 base64 编码(单行)
+       主控端生成:  base64 -w0 ~/.ssh/id_ed25519
+       把输出的一长串字符粘贴进来,按回车结束。
 
 TIP
 
 KEY_B64=""
-# 从 /dev/tty 读直到 END 行
+# 从 /dev/tty 读
 exec 3</dev/tty 2>/dev/null || exec 3<&0
+FIRST=1
 while IFS= read -r line <&3; do
-    # 去掉可能的 CR、空格
-    line=$(printf '%s' "$line" | tr -d '\r' | tr -d ' ')
-    if [ -z "$line" ]; then continue; fi
-    if [ "$line" = "END" ]; then break; fi
+    # 去 CR 和所有空白
+    line=$(printf '%s' "$line" | tr -d '\r' | tr -d ' \t\n')
+    if [ $FIRST -eq 1 ] && [ -z "$line" ]; then continue; fi
+    FIRST=0
+    if [ -z "$line" ]; then break; fi
     KEY_B64="${KEY_B64}${line}"
 done
 exec 3<&- 2>/dev/null || true

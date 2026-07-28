@@ -73,22 +73,24 @@ if (-not (Test-Path $sshDir)) {
     New-Item -ItemType Directory -Path $sshDir -Force | Out-Null
 }
 
-# ---------- 3. 直接粘贴私钥(base64 编码,一次性读) ----------
-Write-Step "3/5" "粘贴私钥的 base64 编码(单行,不换行)"
-Write-Host "  在主控端机跑:  [Convert]::ToBase64String([IO.File]::ReadAllBytes('$env:USERPROFILE\.ssh\id_ed25519'))"
-Write-Host "  或 Git Bash:    base64 ~/.ssh/id_ed25519 | tr -d '\n'"
-Write-Host "  粘贴得到的长字符串,以单独一行 END 结束"
+# ---------- 3. 粘贴 base64 编码的私钥(单行,以回车结束) ----------
+Write-Step "3/5" "粘贴私钥的 base64 编码(单行,回车结束)"
+Write-Host "  主控端生成:  base64 ~/.ssh/id_ed25519  (或 Win PS: [Convert]::ToBase64String([IO.File]::ReadAllBytes('id_ed25519')))"
+Write-Host "  把输出的一长串字符粘贴进来,按回车即可。"
 Write-Host ""
+Write-Host "  > " -NoNewline
 
-$keyB64 = ''
+# 一次性读一行(从 console,不被 iex 劫持)
+$line = [Console]::In.ReadLine()
+# 去掉所有空白 / CR
+$keyB64 = $line -replace '\s', ''
+
+# 兼容性:用户可能分多行粘贴,继续读直到空白行
 while ($true) {
     Write-Host "  > " -NoNewline
-    $line = [Console]::In.ReadLine()
-    if ([string]::IsNullOrEmpty($line)) { continue }
-    if ($line.Trim() -eq 'END') { break }
-    # 去掉可能的空格 / CR
-    $line = $line -replace '\s', ''
-    $keyB64 += $line
+    $extra = [Console]::In.ReadLine()
+    if ([string]::IsNullOrWhiteSpace($extra)) { break }
+    $keyB64 += ($extra -replace '\s', '')
 }
 
 # base64 解码
