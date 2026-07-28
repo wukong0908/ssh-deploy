@@ -58,8 +58,10 @@ if (-not $FrpToken) {
     $sshBin = Get-Command ssh -ErrorAction SilentlyContinue
     $hasKey = Test-Path "$env:USERPROFILE\.ssh\id_*"
     if ($sshBin -and $hasKey) {
-        # 候选:toml / ini / systemd unit file
-        $cmd = "grep -hoE 'token[[:space:]]*=[[:space:]]*\"?[A-Za-z0-9._-]+\"?' /etc/frp/frps.toml /etc/frp/frps.ini 2>/dev/null; systemctl cat frps 2>/dev/null | grep -hoE 'token[[:space:]]*=[[:space:]]*\"?[A-Za-z0-9._-]+\"?' | head -1"
+        # 候选:toml / ini / systemd unit file(here-string 防引号转义)
+        $cmd = @'
+grep -hoE 'token[[:space:]]*=[[:space:]]*"?[A-Za-z0-9._-]+"?' /etc/frp/frps.toml /etc/frp/frps.ini 2>/dev/null; systemctl cat frps 2>/dev/null | grep -hoE 'token[[:space:]]*=[[:space:]]*"?[A-Za-z0-9._-]+"?' | head -1
+'@
         try {
             $remote = ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=8 -o BatchMode=yes -o PasswordAuthentication=no "root@$VpsHost" $cmd 2>$null
             $candidates = $remote -split "`n" | ForEach-Object {
