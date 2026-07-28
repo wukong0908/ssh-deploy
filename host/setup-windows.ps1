@@ -105,15 +105,52 @@ function Write-Step($n, $msg) {
 
 # ---------- 1. OpenSSH Server ----------
 Write-Step "1/5" "检查 OpenSSH Server..."
+$sshdExe = "$env:SystemRoot\System32\OpenSSH\sshd.exe"
 $serverCap = (Get-WindowsCapability -Online -Name "OpenSSH.Server*" -ErrorAction SilentlyContinue) | Where-Object State -eq "Installed"
-if (-not $serverCap) {
-    Write-Host "正在安装 OpenSSH Server..."
-    Add-WindowsCapability -Online -Name "OpenSSH.Server~~~~0.0.1.0" | Out-Null
-    # 装完触发 SCM 重读 + 自动启动
+
+if (-not $serverCap -and -not (Test-Path $sshdExe)) {
+    # 路径 1:从 WinSxS 直拷(秒级,不走 Windows Update)
+    $winsxsDirs = Get-ChildItem "$env:SystemRoot\WinSxS\amd64_openssh-server-components-onecore_*" -Directory -ErrorAction SilentlyContinue |
+        Sort-Object { [version]($_.Name -split '_')[3] } -Descending
+    if ($winsxsDirs) {
+        $src = $winsxsDirs[0].FullName
+        Write-Host "从 WinSxS 离线装 OpenSSH Server...($src)" -ForegroundColor Cyan
+        $dest = "$env:SystemRoot\System32\OpenSSH"
+        if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest -Force | Out-Null }
+        # 拷二进制
+        Copy-Item -Path "$src\*" -Destination $dest -Recurse -Force
+        # 设 ACL(等同 capability 安装结果)
+        icacls $dest /inheritance:r /grant "SYSTEM:(R)" "Administrators:(R)" "Users:(RX)" | Out-Null
+        icacls "$dest\sshd.exe" /inheritance:r /grant "SYSTEM:(RX)" "Administrators:(RX)" | Out-Null
+        # 注册 sshd 服务(Win 默认参数)
+        $binPath = "$dest\sshd.exe"
+        $existing = Get-Service sshd -ErrorAction SilentlyContinue
+        if (-not $existing) {
+            sc.exe create sshd binPath= "`"$binPath`"" DisplayName= "OpenSSH SSH Server" start= auto | Out-Null
+            sc.exe failure sshd reset= 60 actions= restart/5000 | Out-Null
+        }
+        # 拷 sshd_config 默认(若 ProgramData 下还没)
+        if (-not (Test-Path 'C:\ProgramData\ssh\sshd_config') -and (Test-Path "$src\sshd_config_default")) {
+            New-Item -ItemType Directory -Path 'C:\ProgramData\ssh' -Force | Out-Null
+            Copy-Item "$src\sshd_config_default" 'C:\ProgramData\ssh\sshd_config' -Force
+        }
+        # 生成 host keys(若不存在)
+        if (-not (Test-Path 'C:\ProgramData\ssh\ssh_host_ed25519_key')) {
+            & "$dest\ssh-keygen.exe" -A 2>&1 | Out-Null
+        }
+        Write-Host "✅ WinSxS 离线装完成" -ForegroundColor Green
+    } else {
+        # 路径 2:Windows Update(慢)
+        Write-Host "WinSxS 无 OpenSSH,走 Windows Update(可能慢)..." -ForegroundColor Yellow
+        Add-WindowsCapability -Online -Name "OpenSSH.Server~~~~0.0.1.0" | Out-Null
+    }
     Start-Sleep -Seconds 3
     Set-Service sshd -StartupType Automatic
+} elseif ($serverCap) {
+    Write-Host "OpenSSH Server capability 已装。"
+    Set-Service sshd -StartupType Automatic -ErrorAction SilentlyContinue
 } else {
-    Write-Host "OpenSSH Server 已安装。"
+    Write-Host "OpenSSH Server 二进制已存在(非 capability 路径)。" -ForegroundColor Cyan
     Set-Service sshd -StartupType Automatic -ErrorAction SilentlyContinue
 }
 
