@@ -35,8 +35,8 @@
 param(
     [string]$VpsHost,
     [string]$FrpToken,
-    [int]$FrpSshPort = 6000,
-    [string]$LocalUser = 'WuKong',
+    [int]$FrpSshPort = 0,  # 0 = 未传,后续交互问
+    [string]$LocalUser = '',
     [string]$FrpcInstallDir = 'C:\Tools\frp'
 )
 
@@ -52,13 +52,25 @@ if (-not $VpsHost) {
     if (-not $VpsHost) { $VpsHost = $DEFAULT_VPS }
 }
 if (-not $VpsHost) { Write-Error "VPS 地址不能为空" }
+
 if (-not $FrpToken) {
-    $FrpToken = Read-Host "FRPS token(留空将跳过 frpc 配置)" -AsSecureString
-    if ($FrpToken) {
-        $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($FrpToken)
+    $secure = Read-Host "FRPS token(留空将跳过 frpc 配置,回车=跳过)" -AsSecureString
+    if ($secure -and $secure.Length -gt 0) {
+        $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
         $FrpToken = [Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
         [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
     }
+}
+
+# 让 param 默认值也走提示(传参时不问)
+if ($FrpSshPort -le 0) {
+    $portInput = Read-Host "FRP SSH 转发端口 [$DEFAULT_PORT]"
+    if ($portInput) { $FrpSshPort = [int]$portInput } else { $FrpSshPort = $DEFAULT_PORT }
+}
+
+if (-not $LocalUser) {
+    $userInput = Read-Host "本机 Win11 账号用户名 [$DEFAULT_USER]"
+    if ($userInput) { $LocalUser = $userInput } else { $LocalUser = $DEFAULT_USER }
 }
 
 function Write-Step($n, $msg) {
