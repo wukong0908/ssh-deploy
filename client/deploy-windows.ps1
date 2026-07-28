@@ -50,6 +50,9 @@ if (-not $VpsHost) {
 if (-not $LocalUser) {
     $LocalUser = Read-Host "本机 Win11 的账号用户名(例如 WuKong)"
 }
+if (-not $LocalUser) {
+    Write-Error "用户名不能为空,脚本退出"
+}
 
 # ---------- 1. OpenSSH Client ----------
 Write-Step "1/3" "检查 OpenSSH Client..."
@@ -68,6 +71,7 @@ if (-not (Test-Path $sshDir)) { New-Item -ItemType Directory -Path $sshDir -Forc
 
 # ---------- 2. 写 ssh config ----------
 Write-Step "2/3" "写入 $cfg"
+if (-not $LocalUser) { Write-Error "LocalUser 为空,中止" }
 $block = @"
 
 # ===== ssh-deploy: 通过 FRP 连回本机 Win11 =====
