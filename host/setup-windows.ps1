@@ -54,13 +54,14 @@ if (-not $VpsHost) {
 if (-not $VpsHost) { Write-Error "VPS 地址不能为空" }
 
 if (-not $FrpToken) {
-    Write-Host "尝试从 VPS 抓 FRPS token..." -ForegroundColor Yellow
+    Write-Host "尝试从 VPS 抓 FRPS token(仅当本机已有 VPS 公钥时可用)..." -ForegroundColor Yellow
     $sshBin = Get-Command ssh -ErrorAction SilentlyContinue
-    if ($sshBin) {
+    $hasKey = Test-Path "$env:USERPROFILE\.ssh\id_*"
+    if ($sshBin -and $hasKey) {
         # 候选:toml / ini / systemd unit file
         $cmd = "grep -hoE 'token[[:space:]]*=[[:space:]]*\"?[A-Za-z0-9._-]+\"?' /etc/frp/frps.toml /etc/frp/frps.ini 2>/dev/null; systemctl cat frps 2>/dev/null | grep -hoE 'token[[:space:]]*=[[:space:]]*\"?[A-Za-z0-9._-]+\"?' | head -1"
         try {
-            $remote = ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=8 "root@$VpsHost" $cmd 2>$null
+            $remote = ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=8 -o BatchMode=yes -o PasswordAuthentication=no "root@$VpsHost" $cmd 2>$null
             $candidates = $remote -split "`n" | ForEach-Object {
                 ($_ -replace '^\s*token\s*=\s*"?', '' -replace '"?\s*$', '').Trim()
             } | Where-Object { $_ -and $_ -match '^[A-Za-z0-9._-]{8,}$' }
@@ -69,8 +70,10 @@ if (-not $FrpToken) {
                 Write-Host "✅ 从 VPS 拉到 token(长度 $($FrpToken.Length))" -ForegroundColor Green
             }
         } catch {
-            Write-Host "⚠️  VPS 抓取失败:$_" -ForegroundColor Yellow
+            Write-Host "⚠️  VPS 抓取失败:$($_.Exception.Message)" -ForegroundColor Yellow
         }
+    } elseif (-not $hasKey) {
+        Write-Host "⚠️  本机 .ssh 下无 id_* 私钥,跳过自动抓取。" -ForegroundColor Yellow
     }
     if (-not $FrpToken) {
         $secure = Read-Host "FRPS token [回车=跳过 frpc 配置]" -AsSecureString
