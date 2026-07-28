@@ -43,7 +43,14 @@ param(
 $ErrorActionPreference = 'Stop'
 
 # ---------- 0. 交互式收集 ----------
-if (-not $VpsHost) { $VpsHost = Read-Host "VPS 公网 IP 或域名(FRPS 所在)" }
+$DEFAULT_VPS = '8.163.106.31'
+$DEFAULT_PORT = 6000
+$DEFAULT_USER = 'WuKong'
+
+if (-not $VpsHost) {
+    $VpsHost = Read-Host "VPS 公网 IP 或域名(FRPS 所在) [$DEFAULT_VPS]"
+    if (-not $VpsHost) { $VpsHost = $DEFAULT_VPS }
+}
 if (-not $VpsHost) { Write-Error "VPS 地址不能为空" }
 if (-not $FrpToken) {
     $FrpToken = Read-Host "FRPS token(留空将跳过 frpc 配置)" -AsSecureString
