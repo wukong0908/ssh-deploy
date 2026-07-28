@@ -73,40 +73,28 @@ if (-not (Test-Path $sshDir)) {
     New-Item -ItemType Directory -Path $sshDir -Force | Out-Null
 }
 
-# ---------- 3. 粘贴 base64 编码的私钥(单行,以回车结束) ----------
-Write-Step "3/5" "粘贴私钥的 base64 编码(单行,回车结束)"
-Write-Host "  主控端生成:  base64 ~/.ssh/id_ed25519  (或 Win PS: [Convert]::ToBase64String([IO.File]::ReadAllBytes('id_ed25519')))"
-Write-Host "  把输出的一长串字符粘贴进来,按回车即可。"
+# ---------- 3. 直接粘贴 PEM 私钥内容(多行,以单独一行 END 结束) ----------
+Write-Step "3/5" "粘贴私钥 PEM 内容"
+Write-Host "  从主控机的 id_ed25519 文件复制(包含 BEGIN 和 END 行)"
+Write-Host "  完成后单独输一行 END 结束"
 Write-Host ""
-Write-Host "  > " -NoNewline
 
-# 一次性读一行(从 console,不被 iex 劫持)
-$line = [Console]::In.ReadLine()
-# 去掉所有空白 / CR
-$keyB64 = $line -replace '\s', ''
-
-# 兼容性:用户可能分多行粘贴,继续读直到空白行
+$keyLines = @()
 while ($true) {
     Write-Host "  > " -NoNewline
-    $extra = [Console]::In.ReadLine()
-    if ([string]::IsNullOrWhiteSpace($extra)) { break }
-    $keyB64 += ($extra -replace '\s', '')
+    $line = [Console]::In.ReadLine()
+    if ([string]::IsNullOrEmpty($line)) { continue }
+    if ($line.Trim() -eq 'END') { break }
+    $keyLines += $line
 }
-
-# base64 解码
-try {
-    $keyBytes = [Convert]::FromBase64String($keyB64)
-    $keyContent = [System.Text.Encoding]::UTF8.GetString($keyBytes)
-} catch {
-    Write-Error "base64 解码失败: $($_.Exception.Message)。检查输入是否完整、是否带 = padding。"
-}
+$keyContent = ($keyLines -join "`n")
 
 # 校验:必须含 BEGIN/END
 if ($keyContent -notmatch '-----BEGIN .* PRIVATE KEY-----') {
-    Write-Error "解码后没看到 BEGIN 标记。base64 输入有误或被截断。"
+    Write-Error "没看到 BEGIN 标记。检查是否复制完整。"
 }
 if ($keyContent -notmatch '-----END .* PRIVATE KEY-----') {
-    Write-Error "解码后没看到 END 标记。"
+    Write-Error "没看到 END 标记。检查是否复制完整。"
 }
 
 [System.IO.File]::WriteAllText($keyPath, $keyContent, [System.Text.UTF8Encoding]::new($false))
