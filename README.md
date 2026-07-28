@@ -37,35 +37,37 @@
 
 ## 使用
 
-### Windows
+### 主机端(本机 Win11,首次配)
 
 ```powershell
-# 远程一行(需先 git clone 或直接拉文件)
-git clone <repo-url> ssh-deploy
-.\ssh-deploy\client\deploy-windows.ps1
+# 管理员 PowerShell
+irm https://raw.githubusercontent.com/wukong0908/ssh-deploy/main/host/setup-windows.ps1 | iex
+# 提示输入 VPS / FRPS token / SSH 转发端口
+```
+
+### Windows 外机
+
+```powershell
+irm https://raw.githubusercontent.com/wukong0908/ssh-deploy/main/client/deploy-windows.ps1 | iex
+# 提示输入 VPS / 用户名
 ```
 
 ### Android (Termux)
 
 ```bash
-pkg install openssh git
-git clone <repo-url> ssh-deploy
-bash ssh-deploy/client/deploy-android.sh
+curl -fsSL https://raw.githubusercontent.com/wukong0908/ssh-deploy/main/client/deploy-android.sh | bash
 ```
 
 ## 文件
 
 | 文件 | 用途 |
 |---|---|
-| `client/deploy-windows.ps1` | Win 一键部署脚本 |
-| `client/deploy-android.sh` | Android Termux 一键脚本 |
-| `client/ssh_config.template` | SSH config 模板 |
-| `docs/NETWORK.md` | 网络架构详图 |
-| `docs/FRP_SETUP.md` | FRP 服务端/客户端配置 |
-| `scripts/setup-frpc.ps1` | 本机 frpc 客户端启动脚本 |
+| `host/setup-windows.ps1` | 主主机侧一键配置(sshd + frpc) |
+| `client/deploy-windows.ps1` | Win 外机一键部署 |
+| `client/deploy-android.sh` | Android Termux 一键部署 |
 
 ## 安全警告
 
-1. **本仓库不包含任何私钥/密码** — 私钥请自行通过安全渠道分发
-2. **首次运行会让你输入**:VPS IP、SSH 用户名、私钥文件路径
-3. **不要把私钥 push 到仓库** — `.gitignore` 已默认忽略,如有违规 push 立即轮换密钥
+1. **本仓库不包含任何私钥/密码** — 主人主动选密码认证,每端连时输密码
+2. **首次运行会让你输入**:VPS IP、FRPS token、用户名 — 不入仓、不留痕
+3. **VPS root 密码 / frp token 由主人在 prompt 输入**,SecureString 处理,内存中明文不落盘
