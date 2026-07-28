@@ -109,8 +109,12 @@ $serverCap = (Get-WindowsCapability -Online -Name "OpenSSH.Server*" -ErrorAction
 if (-not $serverCap) {
     Write-Host "正在安装 OpenSSH Server..."
     Add-WindowsCapability -Online -Name "OpenSSH.Server~~~~0.0.1.0" | Out-Null
+    # 装完触发 SCM 重读 + 自动启动
+    Start-Sleep -Seconds 3
+    Set-Service sshd -StartupType Automatic
 } else {
     Write-Host "OpenSSH Server 已安装。"
+    Set-Service sshd -StartupType Automatic -ErrorAction SilentlyContinue
 }
 
 # ---------- 2. sshd_config: PasswordAuthentication + 删 Match ----------
@@ -121,8 +125,8 @@ $tmpNew = "$env:TEMP\sshd_new.conf"
 
 $content = Get-Content $cfgPath -Raw
 $content = $content -replace '(?m)^#?PasswordAuthentication\s+no\s*$', 'PasswordAuthentication yes'
-# 删 Match Group administrators 整块(到下一个 Match 或文件尾)
-$content = [regex]::Replace($content, '(?ms)^Match Group administrators\b.*?(?=^Match\b|\Z)', '')
+# 删 Match Group administrators 整块(到下一个 Match / EOF,删块后紧跟的空行)
+$content = [regex]::Replace($content, '(?ms)^Match Group administrators\b.*?(?=^Match\b|\Z)\r?\n?', '')
 [System.IO.File]::WriteAllText($tmpNew, $content, [System.Text.UTF8Encoding]::new($false))
 
 $writeScript = @"
@@ -143,7 +147,7 @@ sc query sshd >> "%LOG%" 2>&1
 endlocal
 "@
 $tmpBat = "$env:TEMP\sshd_setup.bat"
-[System.IO.File]::WriteAllText($tmpBat, $writeScript, [System.Text.Encoding]::UTF8)
+[System.IO.File]::WriteAllText($tmpBat, $writeScript, [System.Text.UTF8Encoding]::new($false))
 $startTime = (Get-Date).AddMinutes(1).ToString('HH:mm')
 $taskName = "SshdSetup_$((Get-Date).Ticks)"
 schtasks /Create /TN $taskName /SC ONCE /ST $startTime /RU SYSTEM /RL HIGHEST /TR "cmd.exe /c `"$tmpBat`"" /F | Out-Null
@@ -181,12 +185,22 @@ if (-not $FrpToken) {
         $zip = "$env:TEMP\frpc.zip"
         Write-Host "下载 frpc..."
         Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
-        Expand-Archive -Path $zip -DestinationPath $FrpcInstallDir -Force
-        # zip 解出 frp_0.61.1_windows_amd64/ 子目录,挪上来
-        Get-ChildItem "$FrpcInstallDir\frp_*" -Directory | ForEach-Object {
-            Get-ChildItem $_.FullName -File | Move-Item -Destination $FrpcInstallDir -Force
-            Remove-Item $_.FullName -Recurse -Force
+        # 解到临时子目录(避免目标目录污染)
+        $expandDir = "$env:TEMP\frpc_expand"
+        if (Test-Path $expandDir) { Remove-Item $expandDir -Recurse -Force }
+        Expand-Archive -Path $zip -DestinationPath $expandDir -Force
+        # 只搬 frpc.exe + LICENSE(扔 frps.exe / frps.toml / frpc.toml 模板 — 本机不需要)
+        $srcSub = Get-ChildItem $expandDir -Directory | Where-Object Name -like 'frp_*' | Select-Object -First 1
+        if ($srcSub) {
+            foreach ($f in 'frpc.exe') {
+                $srcFile = Join-Path $srcSub.FullName $f
+                if (Test-Path $srcFile) { Move-Item $srcFile $FrpcInstallDir -Force }
+            }
+            $licSrc = Join-Path $srcSub.FullName 'LICENSE'
+            if (Test-Path $licSrc) { Move-Item $licSrc $FrpcInstallDir -Force -ErrorAction SilentlyContinue }
         }
+        Remove-Item $expandDir -Recurse -Force
+        Remove-Item $zip -Force -ErrorAction SilentlyContinue
     } else {
         Write-Host "frpc.exe 已存在"
     }
@@ -205,7 +219,7 @@ local_ip = 127.0.0.1
 local_port = 22
 remote_port = $FrpSshPort
 "@
-    Set-Content -Path $iniPath -Value $ini -Encoding UTF8
+    [System.IO.File]::WriteAllText($iniPath, $ini, [System.Text.UTF8Encoding]::new($false))
     Write-Host "frpc.ini 已写"
 
     # 注册 schtasks 自启(SYSTEM / AtLogOn / RestartCount 3)
@@ -232,19 +246,27 @@ remote_port = $FrpSshPort
     }
 }
 
-# ---------- 5. 主人账号密码提示 ----------
-Write-Step "5/5" "主人账号密码检查"
+# ---------- 5. 主人账号密码提示 + 重启 sshd 让新密码生效 ----------
+Write-Step "5/5" "主人账号密码检查 + sshd 重启"
 try {
     $u = Get-LocalUser -Name $LocalUser -ErrorAction Stop
     if (-not $u.PasswordRequired) {
         Write-Host "⚠️  账号 $LocalUser 还没设密码。" -ForegroundColor Yellow
         Write-Host "    跑:  net user $LocalUser *" -ForegroundColor Yellow
-        Write-Host "    否则外机密码 SSH 必败。" -ForegroundColor Yellow
+        Write-Host "    设完后跑本脚本一次(或 Restart-Service sshd)让 sshd 重读。" -ForegroundColor Yellow
     } else {
         Write-Host "✅ 账号 $LocalUser 已设密码。" -ForegroundColor Green
     }
 } catch {
     Write-Host "⚠️  找不到账号 $LocalUser 。外机连时改对的用户名即可。" -ForegroundColor Yellow
+}
+# 重启 sshd,确保任何密码变更被立即生效(Win sshd 缓存 SAM 凭证)
+try {
+    Restart-Service sshd -Force -ErrorAction Stop
+    Start-Sleep -Seconds 2
+    Write-Host "✅ sshd 已重启(sshd 重读 SAM 凭证)" -ForegroundColor Green
+} catch {
+    Write-Host "⚠️  sshd 重启失败:$($_.Exception.Message)" -ForegroundColor Yellow
 }
 
 Write-Host ""

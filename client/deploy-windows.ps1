@@ -29,13 +29,17 @@
 [CmdletBinding()]
 param(
     [string]$VpsHost,
-    [int]$SshPort = 6000,
+    [int]$SshPort = 0,  # 0 = 未传,后续交互问
     [string]$LocalUser
 )
 
 $ErrorActionPreference = 'Stop'
 $sshDir = "$env:USERPROFILE\.ssh"
 $cfg = "$sshDir\config"
+
+$DEFAULT_VPS = '8.163.106.31'
+$DEFAULT_PORT = 6000
+$DEFAULT_USER = 'WuKong'
 
 function Write-Step($n, $msg) {
     Write-Host ""
@@ -44,14 +48,21 @@ function Write-Step($n, $msg) {
 
 # ---------- 0. 交互式收集 ----------
 if (-not $VpsHost) {
-    $VpsHost = Read-Host "VPS 公网 IP 或域名(FRPS 所在)"
-    if (-not $VpsHost) { $VpsHost = '8.163.106.31' }
+    $VpsHost = Read-Host "VPS 公网 IP 或域名(FRPS 所在) [$DEFAULT_VPS]"
+    if (-not $VpsHost) { $VpsHost = $DEFAULT_VPS }
 }
+
 if (-not $LocalUser) {
-    $LocalUser = Read-Host "本机 Win11 的账号用户名(例如 WuKong)"
+    $LocalUser = Read-Host "本机 Win11 的账号用户名 [$DEFAULT_USER]"
+    if (-not $LocalUser) { $LocalUser = $DEFAULT_USER }
 }
 if (-not $LocalUser) {
     Write-Error "用户名不能为空,脚本退出"
+}
+
+if ($SshPort -le 0) {
+    $portInput = Read-Host "FRP SSH 转发端口 [$DEFAULT_PORT]"
+    if ($portInput) { $SshPort = [int]$portInput } else { $SshPort = $DEFAULT_PORT }
 }
 
 # ---------- 1. OpenSSH Client ----------
@@ -72,6 +83,12 @@ if (-not (Test-Path $sshDir)) { New-Item -ItemType Directory -Path $sshDir -Forc
 # ---------- 2. 写 ssh config ----------
 Write-Step "2/3" "写入 $cfg"
 if (-not $LocalUser) { Write-Error "LocalUser 为空,中止" }
+
+# 幂等检查
+$existing = Select-String -Path $cfg -Pattern '^Host wukong-pc$' -ErrorAction SilentlyContinue
+if ($existing) {
+    Write-Host "config 已有 wukong-pc 段,跳过(若需重建,先删)" -ForegroundColor Yellow
+} else {
 $block = @"
 
 # ===== ssh-deploy: 通过 FRP 连回本机 Win11 =====
@@ -88,7 +105,8 @@ Host wukong-pc
 # ===== END ssh-deploy =====
 "@
 if (-not (Test-Path $cfg)) { New-Item -ItemType File -Path $cfg -Force | Out-Null }
-Add-Content -Path $cfg -Value $block -Encoding UTF8
+[System.IO.File]::AppendAllText($cfg, $block, [System.Text.UTF8Encoding]::new($false))
+}
 
 # ---------- 3. alias ----------
 Write-Step "3/3" "配置 PowerShell alias"
