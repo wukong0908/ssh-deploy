@@ -54,7 +54,7 @@ if (-not $VpsHost) {
 if (-not $VpsHost) { Write-Error "VPS 地址不能为空" }
 
 if (-not $FrpToken) {
-    $secure = Read-Host "FRPS token(留空将跳过 frpc 配置,回车=跳过)" -AsSecureString
+    $secure = Read-Host "FRPS token [回车=跳过 frpc 配置]" -AsSecureString
     if ($secure -and $secure.Length -gt 0) {
         $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
         $FrpToken = [Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
