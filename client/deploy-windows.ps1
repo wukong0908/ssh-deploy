@@ -109,7 +109,7 @@ if ($keyContent -notmatch '-----END .* PRIVATE KEY-----') {
     Write-Error "解码后没看到 END 标记。"
 }
 
-[System.IO.File]::WriteAllText($keyPath, $keyContent + "`n", [System.Text.Encoding]::UTF8)
+[System.IO.File]::WriteAllText($keyPath, $keyContent, [System.Text.UTF8Encoding]::new($false))
 icacls $keyPath /inheritance:r /grant:r "${env:USERNAME}:(R)" | Out-Null
 Write-Host "已写 $keyPath"
 
