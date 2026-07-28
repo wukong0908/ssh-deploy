@@ -1,7 +1,7 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # deploy-android.sh
 # Termux 一键部署 SSH client,使 Android 通过 FRP VPS 连回本机 Win11。
-# 私钥通过 stdin 粘贴输入(不需要先存文件)。
+# 私钥通过 base64 编码后粘贴,脚本一次性解码还原(不分行,不被终端截断)。
 
 set -e
 
@@ -18,7 +18,8 @@ fi
 # ---------- 1. 装 openssh / git ----------
 echo "[1/5] 安装 openssh / git..."
 pkg update -y >/dev/null 2>&1 || true
-pkg install -y openssh git
+pkg install -y openssh git coreutils >/dev/null 2>&1 || true
+# coreutils 给 base64
 
 # ---------- 2. 准备 ~/.ssh ----------
 echo "[2/5] 准备 ~/.ssh"
@@ -38,26 +39,41 @@ read -rp "私钥文件名 [${DEFAULT_KEY_NAME}]: " KEY_NAME
 KEY_NAME=${KEY_NAME:-$DEFAULT_KEY_NAME}
 KEY_PATH="$HOME/.ssh/$KEY_NAME"
 
-# ---------- 4. 粘贴私钥 ----------
-echo "[3/5] 粘贴私钥内容(从 -----BEGIN ... PRIVATE KEY----- 到 -----END ... PRIVATE KEY-----)"
-echo "       完成后单独输一行 END 结束"
-KEY_CONTENT=""
-# 从 /dev/tty 直接读,不被 curl 管道/stdin 关闭影响
+# ---------- 4. 粘贴私钥(base64 编码,一次性读,不分行) ----------
+cat <<'TIP'
+
+[3/5] 现在粘贴私钥的 base64 编码(单行,不分行)
+       在主控端机跑:    base64 -w0 ~/.ssh/id_ed25519
+       或 Win PowerShell: [Convert]::ToBase64String([IO.File]::ReadAllBytes("$HOME\.ssh\id_ed25519"))
+       得到一长串字符,粘贴进来,以单独一行 END 结束
+
+TIP
+
+KEY_B64=""
+# 从 /dev/tty 读直到 END 行
 exec 3</dev/tty 2>/dev/null || exec 3<&0
 while IFS= read -r line <&3; do
-    if [ "$line" = "END" ]; then
-        break
-    fi
-    KEY_CONTENT="${KEY_CONTENT}${line}"$'\n'
+    # 去掉可能的 CR、空格
+    line=$(printf '%s' "$line" | tr -d '\r' | tr -d ' ')
+    if [ -z "$line" ]; then continue; fi
+    if [ "$line" = "END" ]; then break; fi
+    KEY_B64="${KEY_B64}${line}"
 done
 exec 3<&- 2>/dev/null || true
 
+# 解码
+KEY_CONTENT=$(printf '%s' "$KEY_B64" | base64 -d 2>/dev/null) || {
+    echo "❌ base64 解码失败(检查输入是否完整)"
+    exit 1
+}
+
+# 校验
 if ! echo "$KEY_CONTENT" | grep -q "-----BEGIN .* PRIVATE KEY-----"; then
-    echo "❌ 没看到 BEGIN 标记,输入有误"
+    echo "❌ 解码后没看到 BEGIN 标记。输入有误或截断了。"
     exit 1
 fi
 if ! echo "$KEY_CONTENT" | grep -q "-----END .* PRIVATE KEY-----"; then
-    echo "❌ 没看到 END 标记,输入有误"
+    echo "❌ 解码后没看到 END 标记。"
     exit 1
 fi
 

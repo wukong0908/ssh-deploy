@@ -73,28 +73,42 @@ if (-not (Test-Path $sshDir)) {
     New-Item -ItemType Directory -Path $sshDir -Force | Out-Null
 }
 
-# ---------- 3. 直接粘贴私钥(以单独一行 END 结束) ----------
-Write-Step "3/5" "粘贴私钥内容(从 -----BEGIN ... PRIVATE KEY----- 到 -----END ... PRIVATE KEY-----,以单独一行 END 结束)"
-$keyLines = @()
-# 用 [Console]::In.ReadLine() 直接读 console,不被 iex/管道劫持
+# ---------- 3. 直接粘贴私钥(base64 编码,一次性读) ----------
+Write-Step "3/5" "粘贴私钥的 base64 编码(单行,不换行)"
+Write-Host "  在主控端机跑:  [Convert]::ToBase64String([IO.File]::ReadAllBytes('$env:USERPROFILE\.ssh\id_ed25519'))"
+Write-Host "  或 Git Bash:    base64 ~/.ssh/id_ed25519 | tr -d '\n'"
+Write-Host "  粘贴得到的长字符串,以单独一行 END 结束"
+Write-Host ""
+
+$keyB64 = ''
 while ($true) {
     Write-Host "  > " -NoNewline
     $line = [Console]::In.ReadLine()
     if ([string]::IsNullOrEmpty($line)) { continue }
     if ($line.Trim() -eq 'END') { break }
-    $keyLines += $line
+    # 去掉可能的空格 / CR
+    $line = $line -replace '\s', ''
+    $keyB64 += $line
 }
-$keyContent = ($keyLines -join "`n")
 
-# 简单校验:必须含 BEGIN/END
-if ($keyContent -notmatch '-----BEGIN .* PRIVATE KEY-----' -or $keyContent -notmatch '-----END .* PRIVATE KEY-----') {
-    Write-Error "私钥格式不对(没看到 BEGIN/END 标记)。请重新跑。"
+# base64 解码
+try {
+    $keyBytes = [Convert]::FromBase64String($keyB64)
+    $keyContent = [System.Text.Encoding]::UTF8.GetString($keyBytes)
+} catch {
+    Write-Error "base64 解码失败: $($_.Exception.Message)。检查输入是否完整、是否带 = padding。"
+}
+
+# 校验:必须含 BEGIN/END
+if ($keyContent -notmatch '-----BEGIN .* PRIVATE KEY-----') {
+    Write-Error "解码后没看到 BEGIN 标记。base64 输入有误或被截断。"
+}
+if ($keyContent -notmatch '-----END .* PRIVATE KEY-----') {
+    Write-Error "解码后没看到 END 标记。"
 }
 
 [System.IO.File]::WriteAllText($keyPath, $keyContent + "`n", [System.Text.Encoding]::UTF8)
-# 私钥权限 Windows 不像 Linux 那么严,但仍建议仅本人读写
 icacls $keyPath /inheritance:r /grant:r "${env:USERNAME}:(R)" | Out-Null
-
 Write-Host "已写 $keyPath"
 
 # ---------- 4. 校验私钥 + 写 ~/.ssh/config ----------
