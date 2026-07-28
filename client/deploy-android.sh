@@ -2,10 +2,11 @@
 # deploy-android.sh
 # Termux 一键部署 SSH client,使 Android 通过 FRP VPS 连回本机 Win11(密码认证)。
 
-set -e
+# 不 set -e:read 在非交互 stdin(curl|bash)下会失败,导致变量未初始化
 
 DEFAULT_VPS="8.163.106.31"
 DEFAULT_PORT=6000
+DEFAULT_USER="WuKong"
 
 # ---------- 0. Termux 检查 ----------
 if [ ! -d "/data/data/com.termux" ]; then
@@ -23,14 +24,17 @@ echo "[2/4] 准备 ~/.ssh"
 mkdir -p "$HOME/.ssh"
 chmod 700 "$HOME/.ssh"
 
-# ---------- 3. 交互收集 ----------
-read -rp "VPS 公网 IP 或域名 [${DEFAULT_VPS}]: " VPS_HOST
+# ---------- 3. 交互收集(读不到时 fallback 默认) ----------
+if [ -t 0 ]; then
+    printf "VPS 公网 IP 或域名 [%s]: " "$DEFAULT_VPS"; read -r VPS_HOST
+    printf "FRP 转发的 SSH 端口 [%s]: " "$DEFAULT_PORT"; read -r SSH_PORT
+    printf "本机 Win11 的账号用户名 (例如 %s): " "$DEFAULT_USER"; read -r LOCAL_USER
+fi
 VPS_HOST=${VPS_HOST:-$DEFAULT_VPS}
-
-read -rp "FRP 转发的 SSH 端口 [${DEFAULT_PORT}]: " SSH_PORT
 SSH_PORT=${SSH_PORT:-$DEFAULT_PORT}
+LOCAL_USER=${LOCAL_USER:-$DEFAULT_USER}
 
-read -rp "本机 Win11 的账号用户名 (例如 WuKong): " LOCAL_USER
+echo "→ VPS=$VPS_HOST  PORT=$SSH_PORT  USER=$LOCAL_USER"
 
 # ---------- 4. 写 ssh config + alias ----------
 echo "[3/4] 写 ~/.ssh/config"
