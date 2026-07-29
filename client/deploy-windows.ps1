@@ -43,7 +43,7 @@ $DEFAULT_USER = 'WuKong'
 
 function Write-Step($n, $msg) {
     Write-Host ""
-    Write-Host "[$n/3] $msg" -ForegroundColor Cyan
+    Write-Host "[$n] $msg" -ForegroundColor Cyan
 }
 
 # ---------- 0. 交互式收集 ----------
@@ -67,15 +67,38 @@ if ($SshPort -le 0) {
 
 # ---------- 1. OpenSSH Client ----------
 Write-Step "1/3" "检查 OpenSSH Client..."
-$cap = (Get-WindowsCapability -Online -Name "OpenSSH.Client*" -ErrorAction SilentlyContinue) | Where-Object State -eq "Installed"
-if (-not $cap) {
-    Write-Host "正在安装 OpenSSH Client..."
-    Add-WindowsCapability -Online -Name "OpenSSH.Client~~~~0.0.1.0" | Out-Null
-} else {
-    Write-Host "OpenSSH Client 已安装。"
+$hasCapability = $true
+try {
+    $cap = (Get-WindowsCapability -Online -Name "OpenSSH.Client*" -ErrorAction SilentlyContinue) | Where-Object State -eq "Installed"
+    if (-not $cap) {
+        Write-Host "正在安装 OpenSSH Client..."
+        Add-WindowsCapability -Online -Name "OpenSSH.Client~~~~0.0.1.0" -ErrorAction Stop | Out-Null
+    } else {
+        Write-Host "OpenSSH Client 已安装。"
+    }
+} catch {
+    Write-Host "⚠️  Get-WindowsCapability 失败:$_" -ForegroundColor Yellow
+    Write-Host "    (常见于 Win 镜像裁剪 / AppX 注册表损坏) fallback 到二进制检查" -ForegroundColor Yellow
+    $hasCapability = $false
+}
+
+if (-not (Get-Command ssh -ErrorAction SilentlyContinue)) {
+    # fallback:从 WinSxS 直接拷(同 host 脚本逻辑)
+    $winsxsDirs = Get-ChildItem "$env:SystemRoot\WinSxS\amd64_openssh-client-components-onecore_*" -Directory -ErrorAction SilentlyContinue |
+        Sort-Object { [version]($_.Name -split '_')[3] } -Descending
+    if ($winsxsDirs) {
+        $src = $winsxsDirs[0].FullName
+        $dest = "$env:SystemRoot\System32\OpenSSH"
+        if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest -Force | Out-Null }
+        # medium-IL 可写 System32\OpenSSH(不像 host 拷 Server 那样被拒)
+        Copy-Item -Path "$src\*" -Destination $dest -Recurse -Force -ErrorAction SilentlyContinue
+        Write-Host "✅ 从 WinSxS 拷 OpenSSH Client 到 $dest" -ForegroundColor Green
+    } else {
+        Write-Error "找不到 ssh.exe,也没 WinSxS 源。手动装 OpenSSH Client 或用 Git for Windows 自带 ssh。"
+    }
 }
 if (-not (Get-Command ssh -ErrorAction SilentlyContinue)) {
-    Write-Error "安装后仍找不到 ssh。重启 PowerShell 再试。"
+    Write-Error "装后仍找不到 ssh。重启 PowerShell 再试。"
 }
 
 if (-not (Test-Path $sshDir)) { New-Item -ItemType Directory -Path $sshDir -Force | Out-Null }
@@ -114,7 +137,7 @@ $profileDir = Split-Path $PROFILE -Parent
 if (-not (Test-Path $profileDir)) { New-Item -ItemType Directory -Path $profileDir -Force | Out-Null }
 if (-not (Test-Path $PROFILE)) { New-Item -ItemType File -Path $PROFILE -Force | Out-Null }
 if (-not (Select-String -Path $PROFILE -Pattern 'function wukong' -SimpleMatch -Quiet)) {
-    Add-Content -Path $PROFILE -Value "`n# ssh-deploy alias`nfunction wukong { ssh wukong-pc }`nSet-Alias -Name wpc -Value wukong`n" -Encoding UTF8
+    [System.IO.File]::AppendAllText($PROFILE, "`n# ssh-deploy alias`nfunction wukong { ssh wukong-pc }`nSet-Alias -Name wpc -Value wukong`n", [System.Text.UTF8Encoding]::new($false))
 }
 
 Write-Host ""
