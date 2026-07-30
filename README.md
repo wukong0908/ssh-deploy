@@ -224,9 +224,6 @@ Host wpc-dev
 | `docs/JSON_SCHEMA.md` | JSON 字段定义 |
 | `docs/ARCHITECTURE.md` | (TBD) 详细架构图 |
 | `docs/DEPLOY.md` | (TBD) 多主机部署指南 |
-| `host/setup-windows.ps1` | **旧版本** v1,主机端兼容 |
-| `client/deploy-windows.ps1` | **旧版本** v1,Win 外机兼容 |
-| `client/deploy-android.sh` | **旧版本** v1,Termux 兼容 |
 
 ## 快速命令(pinned commit)
 
@@ -247,20 +244,15 @@ curl -fsSL https://raw.githubusercontent.com/wukong0908/ssh-deploy/<commit>/term
 
 `<commit>` 用 `main` 也行,但可能被 GitHub raw 缓存拖后;**用 commit hash 保证拿到最新版**.
 
-## 旧版本兼容
+## 旧版本(已删除)
 
-老脚本(host/setup-windows.ps1 / client/deploy-*)仍工作,但**不支持多服务端注册中心**. 需要多主机场景用新版本.
+v1 单主机版 `host/setup-windows.ps1` + `client/deploy-windows.ps1` + `client/deploy-android.sh` **已于 2026-07-31 删库**.
 
-```powershell
-# 旧主机端(单主机,无 VPS API)
-irm https://raw.githubusercontent.com/wukong0908/ssh-deploy/<commit>/host/setup-windows.ps1 | iex
+需要查老版本:git 历史 `git log -- host/setup-windows.ps1`,checkout 到 commit `0857267` 之前.
 
-# 旧 Win 外机(单服务端,固定 wukong-pc alias)
-irm https://raw.githubusercontent.com/wukong0908/ssh-deploy/<commit>/client/deploy-windows.ps1 | iex
-
-# 旧 Termux(单服务端)
-curl -fsSL https://raw.githubusercontent.com/wukong0908/ssh-deploy/<commit>/client/deploy-android.sh | bash
-```
+新部署**只用**:
+- Win: `win/ssh-deploy.ps1`
+- Termux: `termux/ssh-deploy.sh`
 
 ## 安全警告
 
