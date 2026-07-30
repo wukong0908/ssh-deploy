@@ -1,0 +1,25 @@
+[Unit]
+Description=ssh-deploy hosts registry API
+After=network.target
+
+[Service]
+Type=simple
+User=sshdeploy
+Group=sshdeploy
+EnvironmentFile=/etc/ssh-deploy/ssh-deploy.env
+WorkingDirectory=/opt/ssh-deploy
+ExecStart=/usr/bin/python3 /opt/ssh-deploy/server.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# 加固
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/ssh-deploy
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,2 @@
+# ssh-deploy-api 不需要任何第三方依赖,纯 Python stdlib.
+# 留这个文件只是为了让"装了没装依赖"一目了然.
