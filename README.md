@@ -1,165 +1,286 @@
 # ssh-deploy
 
-外机一键 SSH 连回本机的部署脚本,通过 FRP 内网穿透走云端 VPS。
+> **多主机 + 多服务端注册中心** — 一脚本双向部署,客户端从 VPS 拉清单,SSH alias 多段自动生成.
+
+旧版本三脚本(client/deploy-* + host/setup-*)仍兼容,继续用 → 见 [旧版本命令](#旧版本兼容).
 
 ## 架构
 
 ```
-┌──────────────┐   SSH (公网 6000)   ┌──────────────┐   TCP (内网)   ┌──────────────┐
-│  外机 Win/   │ ──────────────────► │ VPS          │ ──────────────► │ 本机 Win11   │
-│  Android     │   走 FRPS 转发       │ 8.163.106.31 │   frpc         │ DESKTOP-WK   │
-└──────────────┘                     │ 7000/6000    │                 │ sshd :22     │
-                                     └──────────────┘                 └──────────────┘
+                   VPS 8.163.106.31
+                   ┌──────────────────────┐
+                   │ frps :7000 / :6000+  │ ← FRP 中转
+                   │ ssh-deploy-api :8080 │ ← Bearer token 鉴权
+                   │ hosts.json           │ ← 多服务端注册清单
+                   └──────────┬───────────┘
+                              │ HTTP GET/POST
+       ┌──────────────────────┼──────────────────────┐
+       │                      │                      │
+   Win 主机 A             Win 主机 B            客户端(Win/Termux)
+   DESKTOP-WK              DESKTOP-DEV
+   Account: WuKong         Account: wukong
+   sshd:22                 sshd:22
+   frpc proxy 6000         frpc proxy 6001
 ```
 
-- **VPS 上跑 FRPS**(frp server),开放 7000(控制) + 6000(SSH 转发)
-- **本机跑 frpc**(frp client),把本机 22 端口映射到 VPS:6000
-- **外机 SSH 客户端连 `8.163.106.31:6000`** → 经 FRPS 转发 → 本机 sshd
+**Win 一脚本 = 双向**(默认):同一台机既当服务端(别人 SSH 进),又当客户端(主动 SSH 出).**Termux 只客户端**.
 
-## 部署流程
+## 关键概念
 
-### 本机(由 `host/setup-windows.ps1` 自动配)
-
-| 步骤 | 动作 |
+| 名词 | 含义 |
 |---|---|
-| OpenSSH Server | 优先从 WinSxS 离线拷(秒级),失败才走 Windows Update |
-| sshd_config | `PasswordAuthentication yes` + 删 `Match Group administrators` 块 |
-| 防火墙 | 22 端口入站放行 |
-| frpc | 下载 0.61.1 + 写 `frpc.ini` + schtasks `frpc-autostart`(SYSTEM/AtLogOn) |
-| 密码 | 检查 `WuKong` 账号 `PasswordRequired`,无则提示 `net user WuKong *` |
+| **VPS** | `8.163.106.31`,跑 frps(:7000 + :6000+)和 ssh-deploy-api(:8080). 单一权威源 |
+| **hosts.json** | VPS 上 `/var/lib/ssh-deploy/hosts.json`,存所有服务端条目(name/port/user/alias) |
+| **Bearer token** | 主人 VPS 上自定的共享密码(防路人). **所有客户端/服务端同一值** |
+| **ServerName** | VPS 注册名,默认 = `$env:COMPUTERNAME` 小写(Win)或 hostname |
+| **alias** | SSH config 里的 `Host` 段名,默认 `wpc-<name>`,例:`wpc-home` / `wpc-dev` |
+| **SSH User** | Win 账号,SSH 协议**严格大小写**:`WuKong`(主人机)/ `wukong`(老机器) |
 
-### 外机(由 `client/deploy-*` 自动配)
+## 三种使用场景
 
-外机只需:**装 ssh client + 写 `~/.ssh/config` 段**。无密钥,密码认证。
-
-## 快速运行命令
-
-### 主机端(本机 Win11,首次配)
+### 场景 1:装第一台主机(本机 Win11)
 
 ```powershell
-# Step 1:管理员 PowerShell 设密码(必须先做)
-net user WuKong *
-
-# Step 2:跑一键部署(pinned commit hash 绕 CDN 缓存)
-irm https://raw.githubusercontent.com/wukong0908/ssh-deploy/ade82fe/host/setup-windows.ps1 | iex
+irm https://raw.githubusercontent.com/wukong0908/ssh-deploy/<commit>/win/ssh-deploy.ps1 | iex
 ```
 
-跑时交互(全回车,token 粘贴):
+跑时:
+1. 选 `[1] Install`(默认双向)
+2. 提示输入:VPS / Bearer token / FRP token / 端口 / 本机账号 → 全有默认
+3. 装完显示:本机 sshd Running + frpc PID + 端口 6000
+4. 末了问"register 到 VPS 吗"→ y → VPS hosts.json +1 条
 
-```
-VPS 公网 IP 或域名(FRPS 所在) [8.163.106.31]:        ← 回车
-FRPS token [回车=跳过 frpc 配置]:                     ← 粘贴 token
-FRP SSH 转发端口 [6000]:                              ← 回车
-本机 Win11 账号用户名 [WuKong]:                       ← 回车
-```
-
-跑完会显示:
-
-```
-[1/5] 检查 OpenSSH Server...
-[2/5] 改 sshd_config(走 SYSTEM 任务绕 ACL)
-[3/5] 放行 22
-[4/5] frpc 配置 + 自启任务
-[5/5] 主人账号密码检查 + sshd 重启
-✅ 主机端部署完成!
-  本机 sshd: Running
-  FRP 入口: 8.163.106.31 :6000
-```
-
-### Windows 外机
+### 场景 2:装第二台主机(老机器,账号 wukong)
 
 ```powershell
-# 普通 PowerShell 即可(无需管理员)
-irm https://raw.githubusercontent.com/wukong0908/ssh-deploy/7b9bf7e/client/deploy-windows.ps1 | iex
+irm https://raw.githubusercontent.com/wukong0908/ssh-deploy/<commit>/win/ssh-deploy.ps1 | iex
 ```
 
-跑时交互:
+跑时:
+1. 选 `[1] Install`
+2. **关键参数**:本机账号输 `wukong`(小写),FRP 端口输 `6001`,ServerName 输 `dev`
+3. 装完:VPS hosts.json +1(`wpc-dev` → `wukong@8.163.106.31:6001`)
+4. **任何已装客户端**重跑 `[3] Switch` → 自动多出 `wpc-dev` alias
 
-```
-VPS 公网 IP 或域名(FRPS 所在) [8.163.106.31]:        ← 回车
-本机 Win11 的账号用户名 [WuKong]:                     ← 回车
-FRP SSH 转发端口 [6000]:                              ← 回车
-```
+### 场景 3:装外机/客户端(Win 或 Termux)
 
-跑完:
-
+**Win**:
 ```powershell
-# 重开 PowerShell 让 alias 生效
-ssh wukong-pc
-# 或 alias:wpc
-# 首次:输 yes → 输 Win11 密码 → 进 shell
+irm https://raw.githubusercontent.com/wukong0908/ssh-deploy/<commit>/win/ssh-deploy.ps1 -InstallMode client | iex
 ```
 
-### Android Termux
-
+**Termux**:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/wukong0908/ssh-deploy/4660158/client/deploy-android.sh | bash
+curl -fsSL https://raw.githubusercontent.com/wukong0908/ssh-deploy/<commit>/termux/ssh-deploy.sh | bash -s -- -v 8.163.106.31 -t YOUR_TOKEN
 ```
 
-非交互 stdin(`curl|bash`)走默认值 8.163.106.31:6000:WuKong。
+跑完自动:
+- 装 OpenSSH Client
+- 拉 VPS 主机清单
+- 写 `~/.ssh/config` 多 `Host wpc-*` 段
+- 写 PowerShell profile / bashrc alias(`wpc-home` 一键 SSH)
 
-跑完:
-
+立刻可用:
 ```bash
-ssh wukong-pc
-# 或 alias:wpc
-# 首次:输 yes → 输 Win11 密码 → 进 shell
+ssh wpc-home   # 进主人机
+ssh wpc-dev    # 进老机器
 ```
 
-### CDN 缓存问题
+## 主菜单(Win 脚本)
 
-GitHub raw 会缓存 master/main 分支,有时拉不到最新版。**解决方法**:用 commit hash 路径(见上)。跑完想拿最新版,直接换 hash。
-
-## 验证
-
-### 主机端
-
-```powershell
-Get-Service sshd                                # Running
-Get-ScheduledTask -TaskName frpc-autostart       # Ready
-Get-Process frpc                                 # PID 存在
-Get-NetTCPConnection -LocalPort 22               # Listen
-ssh WuKong@127.0.0.1                             # 输密码 → 进 shell
+```
+========== ssh-deploy (DESKTOP-WK) =========
+  [1] Install (default: server + client both)
+  [2] Status
+  [3] Switch (重拉 VPS 清单)
+  [4] Register this host to VPS directory
+  [5] Unregister this host
+  [0] Exit
+==========================================
 ```
 
-### VPS 端(frps 跑在 VPS 上)
+**Status 例子**:
+```
+========== ssh-deploy Status ==========
+主机名: DESKTOP-WK
+VPS:    8.163.106.31
 
+sshd: Running / Automatic       ← 服务端
+ssh.exe: C:\Windows\System32\OpenSSH\ssh.exe
+frpc: PID 1234 running          ← frpc 转发 22→6000
+frpc-autostart: Ready
+port 22: LISTEN
+
+--- VPS 注册主机 ---
+  home         port 6000   user WuKong       alias wpc-home
+  dev          port 6001   user wukong       alias wpc-dev
+
+--- ~/.ssh/config (wpc-* 段) ---
+  Host wpc-home
+  Host wpc-dev
+=========================================
+```
+
+## Bearer Token 说明
+
+| 项 | 值 |
+|---|---|
+| 是什么 | 主人 VPS 上自定字符串,例:`wukong_ssh_2026_secret_xxx` |
+| 作用 | 鉴权 `http://VPS:8080/ssh-deploy/*` 所有 endpoints |
+| 强度 | **只防路人**;真正安全靠 VPS 上换值 |
+| 公开仓库风险 | `wukong0908/ssh-deploy` 是**公开**仓,**token 写入仓 = 公开** |
+| 主人的做法 | token 不入仓;只在 VPS 的 `/etc/ssh-deploy/ssh-deploy.env` 存;客户端跑时手动输入 |
+
+**主人 VPS 上生成 token**:
 ```bash
-systemctl status frps                            # active
-# 日志应见 [ssh] proxy registered
+openssl rand -hex 16    # 例:e8a3...d4b2
+# 写进 /etc/ssh-deploy/ssh-deploy.env,systemctl restart ssh-deploy-api
 ```
 
-### 外机端
+## VPS API 速查
 
-```bash
-ssh wukong-pc
-# 输 yes(首次)+ Win11 密码 → 进 shell
+| Endpoint | 方法 | 鉴权 | 作用 |
+|---|---|---|---|
+| `/healthz` | GET | 否 | 健康检查 |
+| `/ssh-deploy/hosts` | GET | Bearer | 拉清单 |
+| `/ssh-deploy/register` | POST | Bearer | 注册(`{name, vps_host, ssh_port, ssh_user, ...}`) |
+| `/ssh-deploy/unregister` | POST | Bearer | 删(`{name}`) |
+
+详见 [vps/INSTALL.md](vps/INSTALL.md) + [docs/JSON_SCHEMA.md](docs/JSON_SCHEMA.md).
+
+## 客户端生成 SSH config 示例
+
+VPS 返回:
+```json
+{
+  "version": "1.0",
+  "servers": [
+    {"name": "home", "ssh_port": 6000, "ssh_user": "WuKong", "alias": "wpc-home"},
+    {"name": "dev",  "ssh_port": 6001, "ssh_user": "wukong", "alias": "wpc-dev"}
+  ]
+}
 ```
+
+自动写到 `~/.ssh/config`:
+```sshconfig
+# ===== ssh-deploy: home =====
+Host wpc-home
+    HostName 8.163.106.31
+    Port 6000
+    User WuKong
+    PreferredAuthentications password
+    PubkeyAuthentication no
+    StrictHostKeyChecking accept-new
+    ServerAliveInterval 30
+    ServerAliveCountMax 3
+    Compression yes
+# ===== END ssh-deploy =====
+
+# ===== ssh-deploy: dev =====
+Host wpc-dev
+    HostName 8.163.106.31
+    Port 6001
+    User wukong
+    PreferredAuthentications password
+    PubkeyAuthentication no
+    StrictHostKeyChecking accept-new
+    ServerAliveInterval 30
+    ServerAliveCountMax 3
+    Compression yes
+# ===== END ssh-deploy =====
+```
+
+**`User` 字段大小写由 JSON 控制**,主人机 = `WuKong`,老机器 = `wukong`. **不用主人手记**.
+
+## 离线 OpenSSH(必看)
+
+装脚本走**三级优先级**,**不再被 Windows Update CDN 拖到 30 分钟**:
+
+1. **仓内 zip**(`bin/openssh/OpenSSH-Win64.zip`,4.8 MB,微软 v9.5.0)
+2. **本机 WinSxS**(`C:\Windows\WinSxS\amd64_openssh-*-components-onecore_*`)
+3. **Windows Update CDN**(5 ~ 30 分钟,兜底)
+
+| 路径 | 时间 |
+|---|---|
+| 仓内 zip | ~10 秒 |
+| WinSxS | ~5 秒 |
+| Windows Update | 5 ~ 30 分钟 |
+
+`irm ... | iex` 跑时,自动从 `raw.githubusercontent.com/wukong0908/ssh-deploy/main/bin/openssh/OpenSSH-Win64.zip` 拉 5MB zip.
 
 ## 文件
 
 | 文件 | 用途 |
 |---|---|
-| `host/setup-windows.ps1` | 主主机侧一键配置(sshd + frpc + 自启) |
-| `client/deploy-windows.ps1` | Win 外机一键部署(ssh client + config) |
-| `client/deploy-android.sh` | Android Termux 一键部署 |
+| `win/ssh-deploy.ps1` | **Win 主入口**(默认双向:server + client) |
+| `termux/ssh-deploy.sh` | **Termux 主入口**(只客户端) |
+| `bin/openssh/OpenSSH-Win64.zip` | 微软 Win32-OpenSSH v9.5.0 离线包(4.8 MB) |
+| `bin/openssh/README.md` | 离线包来源 + 重生成 SOP |
+| `vps/ssh-deploy-api/server.py` | VPS API(Python 3 stdlib) |
+| `vps/nginx-ssh-deploy.conf` | nginx 反代 + Bearer token 鉴权 |
+| `vps/ssh-deploy-api.service` | systemd unit |
+| `vps/INSTALL.md` | VPS 部署 SOP(8 步 + 故障排查) |
+| `vps/hosts.json.example` | hosts.json 示例 |
+| `docs/JSON_SCHEMA.md` | JSON 字段定义 |
+| `docs/ARCHITECTURE.md` | (TBD) 详细架构图 |
+| `docs/DEPLOY.md` | (TBD) 多主机部署指南 |
+| `host/setup-windows.ps1` | **旧版本** v1,主机端兼容 |
+| `client/deploy-windows.ps1` | **旧版本** v1,Win 外机兼容 |
+| `client/deploy-android.sh` | **旧版本** v1,Termux 兼容 |
+
+## 快速命令(pinned commit)
+
+**Win 双向(本机)**:
+```powershell
+irm https://raw.githubusercontent.com/wukong0908/ssh-deploy/<commit>/win/ssh-deploy.ps1 | iex
+```
+
+**Win 只客户端(外机)**:
+```powershell
+irm https://raw.githubusercontent.com/wukong0908/ssh-deploy/<commit>/win/ssh-deploy.ps1 -InstallMode client | iex
+```
+
+**Termux 客户端**:
+```bash
+curl -fsSL https://raw.githubusercontent.com/wukong0908/ssh-deploy/<commit>/termux/ssh-deploy.sh | bash -s -- -v 8.163.106.31 -t YOUR_TOKEN
+```
+
+`<commit>` 用 `main` 也行,但可能被 GitHub raw 缓存拖后;**用 commit hash 保证拿到最新版**.
+
+## 旧版本兼容
+
+老脚本(host/setup-windows.ps1 / client/deploy-*)仍工作,但**不支持多服务端注册中心**. 需要多主机场景用新版本.
+
+```powershell
+# 旧主机端(单主机,无 VPS API)
+irm https://raw.githubusercontent.com/wukong0908/ssh-deploy/<commit>/host/setup-windows.ps1 | iex
+
+# 旧 Win 外机(单服务端,固定 wukong-pc alias)
+irm https://raw.githubusercontent.com/wukong0908/ssh-deploy/<commit>/client/deploy-windows.ps1 | iex
+
+# 旧 Termux(单服务端)
+curl -fsSL https://raw.githubusercontent.com/wukong0908/ssh-deploy/<commit>/client/deploy-android.sh | bash
+```
 
 ## 安全警告
 
-1. **本仓库不包含任何私钥/密码/token** — 主人主动选密码认证,每端连时输密码
-2. **首次运行会让你输入**:VPS IP、FRPS token、用户名 — 不入仓、不留痕
-3. **FRPS token 由 SecureString 处理**,内存中明文不落盘(仅写入本机 `frpc.ini`)
-4. **公开仓库红线**:即便主人要求也不上传私钥/密码/token
-5. **主人公开 token 风险**:旧 token `18ec...dc1a` 已在本对话历史暴露,主人跑通后建议去 VPS 改新值
+1. **本仓库不包含任何私钥 / 密码 / token**
+2. **Bearer token 由主人手动管理**,不入仓
+3. **公开仓库红线**:即便主人要求也不上传私钥 / 密码 / token
+4. **老 token 风险**:旧 `18ec...dc1a` 已在本对话历史暴露,主人跑通后建议去 VPS 改新值
 
 ## 验证清单
 
-跑完 `setup-windows.ps1` 后:
-
+### 主主机(Win)
 - [ ] `Get-Service sshd` → Running
 - [ ] `Get-NetTCPConnection -LocalPort 22` → Listen
 - [ ] `Get-Process frpc` → PID 存在
 - [ ] `Get-ScheduledTask frpc-autostart` → Ready
-- [ ] `ssh WuKong@127.0.0.1` → 输密码 → 进 shell
-- [ ] VPS 端 `systemctl status frps` → 看到 `proxy [ssh]` 已注册
-- [ ] 外机 `ssh wukong-pc` → 输 yes + 密码 → 进 shell
+- [ ] `ssh <user>@127.0.0.1` → 输密码 → 进 shell
+- [ ] VPS hosts.json 有本机条目:`curl -H "Authorization: Bearer $TOKEN" http://8.163.106.31:8080/ssh-deploy/hosts | jq`
+
+### 客户端(任意)
+- [ ] `ssh wpc-home` → 输密码 → 进主人机
+- [ ] `ssh wpc-dev` → 输密码 → 进老机器(若装过)
+- [ ] `~/.ssh/config` 有多 Host wpc-* 段
+- [ ] `wpc-home` alias 可用(PowerShell 重启后 / `source ~/.bashrc`)
