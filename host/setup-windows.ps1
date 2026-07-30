@@ -103,23 +103,91 @@ function Write-Step($n, $msg) {
     Write-Host "[$n] $msg" -ForegroundColor Cyan
 }
 
+# 找 zip 路径:脚本本地 bin/ 或 GitHub raw(irm|iex 场景)
+$OPENSSH_ZIP_NAME = 'OpenSSH-Win64.zip'
+$OPENSSH_ZIP_SHA256 = 'bd48fe985d400402c278c485db20e6a82bc4c7f7d8e0ef5a81128f523096530c'
+$OPENSSH_GH_URL = 'https://raw.githubusercontent.com/wukong0908/ssh-deploy/main/bin/openssh/OpenSSH-Win64.zip'
+
+function Get-OpenSSHZip {
+    param([string]$WorkDir)
+    # 1) 脚本本地:irm|iex 时 $PSCommandPath 为空,跳过
+    if ($PSCommandPath) {
+        $scriptDir = Split-Path $PSCommandPath -Parent
+        # 仓布局: ssh-deploy/host/setup-windows.ps1 → ../bin/openssh/<zip>
+        $candidates = @(
+            (Join-Path $scriptDir "..\bin\openssh\$OPENSSH_ZIP_NAME"),
+            (Join-Path $scriptDir "bin\openssh\$OPENSSH_ZIP_NAME")
+        )
+        foreach ($p in $candidates) {
+            if (Test-Path $p) { return @{ path = $p; source = "local" } }
+        }
+    }
+    # 2) GitHub raw(irm|iex)
+    $localZip = Join-Path $WorkDir $OPENSSH_ZIP_NAME
+    if (Test-Path $localZip -PathType Leaf) {
+        return @{ path = $localZip; source = "cached" }
+    }
+    Write-Host "下载离线 OpenSSH 包(从 GitHub raw)..." -ForegroundColor Cyan
+    try {
+        Invoke-WebRequest -Uri $OPENSSH_GH_URL -OutFile $localZip -UseBasicParsing -ErrorAction Stop
+        return @{ path = $localZip; source = "github-raw" }
+    } catch {
+        Write-Host "⚠️  GitHub 下载失败:$($_.Exception.Message)" -ForegroundColor Yellow
+        return $null
+    }
+}
+
+function Expand-OpenSSHZip {
+    param([string]$ZipPath, [string]$Dest, [string]$ExpandRoot)
+    # 解压到临时目录,返回 OpenSSH-Win64 子目录路径
+    $expandDir = Join-Path $ExpandRoot 'openssh_expand'
+    if (Test-Path $expandDir) { Remove-Item $expandDir -Recurse -Force }
+    Expand-Archive -Path $ZipPath -DestinationPath $expandDir -Force
+    $sub = Get-ChildItem $expandDir -Directory | Where-Object Name -like 'OpenSSH-Win64' | Select-Object -First 1
+    if (-not $sub) { throw "zip 内找不到 OpenSSH-Win64 子目录" }
+    return $sub.FullName
+}
+
 # ---------- 1. OpenSSH Server ----------
 Write-Step "1/5" "检查 OpenSSH Server..."
 $sshdExe = "$env:SystemRoot\System32\OpenSSH\sshd.exe"
 $serverCap = (Get-WindowsCapability -Online -Name "OpenSSH.Server*" -ErrorAction SilentlyContinue) | Where-Object State -eq "Installed"
 
-if (-not $serverCap -and -not (Test-Path $sshdExe)) {
-    # 路径 1:从 WinSxS 直拷(秒级,不走 Windows Update)
-    $winsxsDirs = Get-ChildItem "$env:SystemRoot\WinSxS\amd64_openssh-server-components-onecore_*" -Directory -ErrorAction SilentlyContinue |
-        Sort-Object { [version]($_.Name -split '_')[3] } -Descending
-    if ($winsxsDirs) {
-        $src = $winsxsDirs[0].FullName
-        Write-Host "从 WinSxS 离线装 OpenSSH Server...($src)" -ForegroundColor Cyan
+if ($serverCap -or (Test-Path $sshdExe)) {
+    Write-Host "OpenSSH Server 已就绪(capability 或二进制)。" -ForegroundColor Cyan
+    Set-Service sshd -StartupType Automatic -ErrorAction SilentlyContinue
+} else {
+    # 三级优先级:仓内 zip → WinSxS → Windows Update
+    $dest = "$env:SystemRoot\System32\OpenSSH"
+    $expandRoot = "$env:TEMP\openssh_setup"
+    if (-not (Test-Path $expandRoot)) { New-Item -ItemType Directory -Path $expandRoot -Force | Out-Null }
+    $installed = $false
 
-        # System32\OpenSSH 写入需 SYSTEM — 走 schtasks 临时任务 + cmd copy
-        $dest = "$env:SystemRoot\System32\OpenSSH"
-        $logPath = "$env:TEMP\winsxs_install_log.txt"
-        $tmpBat = "$env:TEMP\winsxs_install.bat"
+    # 路径 1:仓内 zip / GitHub raw
+    $zipInfo = Get-OpenSSHZip -WorkDir $expandRoot
+    if ($zipInfo) {
+        Write-Host "从 $($zipInfo.source) 解压 OpenSSH..." -ForegroundColor Cyan
+        $srcDir = Expand-OpenSSHZip -ZipPath $zipInfo.path -Dest $dest -ExpandRoot $expandRoot
+        Write-Host "✅ OpenSSH 解压完成 → 走 SYSTEM 任务拷到 System32" -ForegroundColor Green
+        $src = $srcDir
+        $installed = $true
+    }
+
+    # 路径 2:WinSxS(无 zip 或 zip 失败)
+    if (-not $installed) {
+        $winsxsDirs = Get-ChildItem "$env:SystemRoot\WinSxS\amd64_openssh-server-components-onecore_*" -Directory -ErrorAction SilentlyContinue |
+            Sort-Object { [version]($_.Name -split '_')[3] } -Descending
+        if ($winsxsDirs) {
+            $src = $winsxsDirs[0].FullName
+            Write-Host "从 WinSxS 离线装 OpenSSH Server...($src)" -ForegroundColor Cyan
+            $installed = $true
+        }
+    }
+
+    if ($installed) {
+        # System32\OpenSSH 写入需 SYSTEM — schtasks 临时任务 + cmd xcopy
+        $logPath = "$env:TEMP\openssh_install_log.txt"
+        $tmpBat = "$env:TEMP\openssh_install.bat"
 
         $writeScript = @"
 @echo off
@@ -142,27 +210,21 @@ endlocal
 "@
         [System.IO.File]::WriteAllText($tmpBat, $writeScript, [System.Text.UTF8Encoding]::new($false))
         $startTime = (Get-Date).AddMinutes(1).ToString('HH:mm')
-        $taskName = "WinsxsInstall_$((Get-Date).Ticks)"
+        $taskName = "OpenSSHInstall_$((Get-Date).Ticks)"
         schtasks /Create /TN $taskName /SC ONCE /ST $startTime /RU SYSTEM /RL HIGHEST /TR "cmd.exe /c `"$tmpBat`"" /F | Out-Null
         schtasks /Run /TN $taskName | Out-Null
         Start-Sleep -Seconds 15
         schtasks /Delete /TN $taskName /F | Out-Null
         Get-Content $logPath
         Remove-Item $tmpBat -Force -ErrorAction SilentlyContinue
-        Write-Host "✅ WinSxS 离线装完成" -ForegroundColor Green
+        Write-Host "✅ OpenSSH 离线装完成" -ForegroundColor Green
     } else {
-        # 路径 2:Windows Update(慢)
-        Write-Host "WinSxS 无 OpenSSH,走 Windows Update(可能慢)..." -ForegroundColor Yellow
+        # 路径 3:Windows Update(慢)
+        Write-Host "WinSxS + zip 都不可用,走 Windows Update(可能慢)..." -ForegroundColor Yellow
         Add-WindowsCapability -Online -Name "OpenSSH.Server~~~~0.0.1.0" | Out-Null
     }
     Start-Sleep -Seconds 3
     Set-Service sshd -StartupType Automatic
-} elseif ($serverCap) {
-    Write-Host "OpenSSH Server capability 已装。"
-    Set-Service sshd -StartupType Automatic -ErrorAction SilentlyContinue
-} else {
-    Write-Host "OpenSSH Server 二进制已存在(非 capability 路径)。" -ForegroundColor Cyan
-    Set-Service sshd -StartupType Automatic -ErrorAction SilentlyContinue
 }
 
 # ---------- 2. sshd_config: PasswordAuthentication + 删 Match ----------

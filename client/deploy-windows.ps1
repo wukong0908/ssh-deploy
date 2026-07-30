@@ -46,6 +46,36 @@ function Write-Step($n, $msg) {
     Write-Host "[$n] $msg" -ForegroundColor Cyan
 }
 
+# 找 zip 路径:脚本本地 bin/ 或 GitHub raw(irm|iex 场景)
+$OPENSSH_ZIP_NAME = 'OpenSSH-Win64.zip'
+$OPENSSH_GH_URL = 'https://raw.githubusercontent.com/wukong0908/ssh-deploy/main/bin/openssh/OpenSSH-Win64.zip'
+
+function Get-OpenSSHZip {
+    param([string]$WorkDir)
+    if ($PSCommandPath) {
+        $scriptDir = Split-Path $PSCommandPath -Parent
+        $candidates = @(
+            (Join-Path $scriptDir "..\bin\openssh\$OPENSSH_ZIP_NAME"),
+            (Join-Path $scriptDir "bin\openssh\$OPENSSH_ZIP_NAME")
+        )
+        foreach ($p in $candidates) {
+            if (Test-Path $p) { return @{ path = $p; source = "local" } }
+        }
+    }
+    $localZip = Join-Path $WorkDir $OPENSSH_ZIP_NAME
+    if (Test-Path $localZip -PathType Leaf) {
+        return @{ path = $localZip; source = "cached" }
+    }
+    Write-Host "下载离线 OpenSSH 包(从 GitHub raw)..." -ForegroundColor Cyan
+    try {
+        Invoke-WebRequest -Uri $OPENSSH_GH_URL -OutFile $localZip -UseBasicParsing -ErrorAction Stop
+        return @{ path = $localZip; source = "github-raw" }
+    } catch {
+        Write-Host "⚠️  GitHub 下载失败:$($_.Exception.Message)" -ForegroundColor Yellow
+        return $null
+    }
+}
+
 # ---------- 0. 交互式收集 ----------
 if (-not $VpsHost) {
     $VpsHost = Read-Host "VPS 公网 IP 或域名(FRPS 所在) [$DEFAULT_VPS]"
@@ -67,38 +97,72 @@ if ($SshPort -le 0) {
 
 # ---------- 1. OpenSSH Client ----------
 Write-Step "1/3" "检查 OpenSSH Client..."
-$hasCapability = $true
+$dest = "$env:SystemRoot\System32\OpenSSH"
+$sshExe = "$dest\ssh.exe"
+$hasCap = $true
 try {
     $cap = (Get-WindowsCapability -Online -Name "OpenSSH.Client*" -ErrorAction SilentlyContinue) | Where-Object State -eq "Installed"
     if (-not $cap) {
-        Write-Host "正在安装 OpenSSH Client..."
-        Add-WindowsCapability -Online -Name "OpenSSH.Client~~~~0.0.1.0" -ErrorAction Stop | Out-Null
+        Write-Host "正在装 OpenSSH Client(走三级优先级:zip → WinSxS → Win Update)..."
     } else {
-        Write-Host "OpenSSH Client 已安装。"
+        Write-Host "OpenSSH Client capability 已装。"
     }
 } catch {
     Write-Host "⚠️  Get-WindowsCapability 失败:$_" -ForegroundColor Yellow
-    Write-Host "    (常见于 Win 镜像裁剪 / AppX 注册表损坏) fallback 到二进制检查" -ForegroundColor Yellow
-    $hasCapability = $false
+    $hasCap = $false
 }
 
-if (-not (Get-Command ssh -ErrorAction SilentlyContinue)) {
-    # fallback:从 WinSxS 直接拷(同 host 脚本逻辑)
-    $winsxsDirs = Get-ChildItem "$env:SystemRoot\WinSxS\amd64_openssh-client-components-onecore_*" -Directory -ErrorAction SilentlyContinue |
-        Sort-Object { [version]($_.Name -split '_')[3] } -Descending
-    if ($winsxsDirs) {
-        $src = $winsxsDirs[0].FullName
-        $dest = "$env:SystemRoot\System32\OpenSSH"
-        if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest -Force | Out-Null }
-        # medium-IL 可写 System32\OpenSSH(不像 host 拷 Server 那样被拒)
-        Copy-Item -Path "$src\*" -Destination $dest -Recurse -Force -ErrorAction SilentlyContinue
-        Write-Host "✅ 从 WinSxS 拷 OpenSSH Client 到 $dest" -ForegroundColor Green
-    } else {
-        Write-Error "找不到 ssh.exe,也没 WinSxS 源。手动装 OpenSSH Client 或用 Git for Windows 自带 ssh。"
+if (-not (Test-Path $sshExe)) {
+    $expandRoot = "$env:TEMP\openssh_setup"
+    if (-not (Test-Path $expandRoot)) { New-Item -ItemType Directory -Path $expandRoot -Force | Out-Null }
+    $installed = $false
+
+    # 路径 1:仓内 zip / GitHub raw
+    $zipInfo = Get-OpenSSHZip -WorkDir $expandRoot
+    if ($zipInfo) {
+        Write-Host "从 $($zipInfo.source) 解压 OpenSSH Client..." -ForegroundColor Cyan
+        try {
+            if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest -Force | Out-Null }
+            Expand-Archive -Path $zipInfo.path -DestinationPath $expandRoot -Force
+            $sub = Get-ChildItem $expandRoot -Directory | Where-Object Name -like 'OpenSSH-Win64' | Select-Object -First 1
+            if ($sub) {
+                # medium-IL 可写 System32\OpenSSH
+                Copy-Item -Path "$($sub.FullName)\*" -Destination $dest -Recurse -Force
+                Write-Host "✅ 从 zip 解 OpenSSH Client 到 $dest" -ForegroundColor Green
+                $installed = $true
+            }
+        } catch {
+            Write-Host "⚠️  zip 解压失败:$($_.Exception.Message)" -ForegroundColor Yellow
+        }
+    }
+
+    # 路径 2:WinSxS
+    if (-not $installed) {
+        $winsxsDirs = Get-ChildItem "$env:SystemRoot\WinSxS\amd64_openssh-client-components-onecore_*" -Directory -ErrorAction SilentlyContinue |
+            Sort-Object { [version]($_.Name -split '_')[3] } -Descending
+        if ($winsxsDirs) {
+            $src = $winsxsDirs[0].FullName
+            Write-Host "从 WinSxS 拷 OpenSSH Client...($src)" -ForegroundColor Cyan
+            if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest -Force | Out-Null }
+            Copy-Item -Path "$src\*" -Destination $dest -Recurse -Force -ErrorAction SilentlyContinue
+            $installed = $true
+        }
+    }
+
+    # 路径 3:Windows Update
+    if (-not $installed) {
+        Write-Host "WinSxS + zip 都没,走 Windows Update(可能慢)..." -ForegroundColor Yellow
+        try {
+            Add-WindowsCapability -Online -Name "OpenSSH.Client~~~~0.0.1.0" -ErrorAction Stop | Out-Null
+            $installed = $true
+        } catch {
+            Write-Error "OpenSSH Client 装失败。看 $_"
+        }
     }
 }
-if (-not (Get-Command ssh -ErrorAction SilentlyContinue)) {
-    Write-Error "装后仍找不到 ssh。重启 PowerShell 再试。"
+
+if (-not (Test-Path $sshExe)) {
+    Write-Error "找不到 ssh.exe。重启 PowerShell 再试,或手动装 OpenSSH Client。"
 }
 
 if (-not (Test-Path $sshDir)) { New-Item -ItemType Directory -Path $sshDir -Force | Out-Null }
