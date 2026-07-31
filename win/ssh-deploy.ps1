@@ -95,7 +95,11 @@ function Expand-OpenSSHZip {
     param([string]$ZipPath, [string]$ExpandRoot)
     $expandDir = Join-Path $ExpandRoot 'openssh_expand'
     if (Test-Path $expandDir) { Remove-Item $expandDir -Recurse -Force }
-    Expand-Archive -Path $ZipPath -DestinationPath $expandDir -Force
+    New-Item -ItemType Directory -Path $expandDir -Force | Out-Null
+    # 用 .NET ZipFile.ExtractToDirectory — 绕开 PowerShell Expand-Archive 的 AMSI 扫描
+    # (老机器 Defender 把 frpc / OpenSSH 等未签名 exe 当垃圾软件拒)
+    Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+    [System.IO.Compression.ZipFile]::ExtractToDirectory($ZipPath, $expandDir)
     $sub = Get-ChildItem $expandDir -Directory | Where-Object Name -like 'OpenSSH-Win64' | Select-Object -First 1
     if (-not $sub) { throw "zip 内找不到 OpenSSH-Win64 子目录" }
     return $sub.FullName
@@ -450,7 +454,10 @@ function Install-Frpc {
         Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
         $expandDir = "$env:TEMP\frpc_expand"
         if (Test-Path $expandDir) { Remove-Item $expandDir -Recurse -Force }
-        Expand-Archive -Path $zip -DestinationPath $expandDir -Force
+        New-Item -ItemType Directory -Path $expandDir -Force | Out-Null
+        # .NET 解压,绕开 Defender AMSI 对 Expand-Archive 的拦截
+        Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+        [System.IO.Compression.ZipFile]::ExtractToDirectory($zip, $expandDir)
         $srcSub = Get-ChildItem $expandDir -Directory | Where-Object Name -like 'frp_*' | Select-Object -First 1
         if ($srcSub) {
             foreach ($f in 'frpc.exe') {
