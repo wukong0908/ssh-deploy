@@ -96,10 +96,24 @@ function Expand-OpenSSHZip {
     $expandDir = Join-Path $ExpandRoot 'openssh_expand'
     if (Test-Path $expandDir) { Remove-Item $expandDir -Recurse -Force }
     New-Item -ItemType Directory -Path $expandDir -Force | Out-Null
-    # 用 .NET ZipFile.ExtractToDirectory — 绕开 PowerShell Expand-Archive 的 AMSI 扫描
-    # (老机器 Defender 把 frpc / OpenSSH 等未签名 exe 当垃圾软件拒)
+    # 网络下载的 zip 带 MotW(Zone.Identifier),Defender 实时扫描 → 解压拦
+    try { Unblock-File -Path $ZipPath -ErrorAction Stop } catch {}
     Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
-    [System.IO.Compression.ZipFile]::ExtractToDirectory($ZipPath, $expandDir)
+    $zipFull = [System.IO.Path]::GetFullPath($ZipPath)
+    # 用 ZipArchive 显式枚举解压(ExtractToDirectory 在某些 Defender 版本仍被拦)
+    $archive = [System.IO.Compression.ZipFile]::OpenRead($zipFull)
+    try {
+        foreach ($entry in $archive.Entries) {
+            $destPath = Join-Path $expandDir $entry.FullName
+            $destDir = Split-Path $destPath -Parent
+            if (-not (Test-Path $destDir)) { New-Item -ItemType Directory -Path $destDir -Force | Out-Null }
+            $entryStream = $entry.Open()
+            try {
+                $fileStream = [System.IO.File]::Create($destPath)
+                try { $entryStream.CopyTo($fileStream) } finally { $fileStream.Close() }
+            } finally { $entryStream.Close() }
+        }
+    } finally { $archive.Dispose() }
     $sub = Get-ChildItem $expandDir -Directory | Where-Object Name -like 'OpenSSH-Win64' | Select-Object -First 1
     if (-not $sub) { throw "zip 内找不到 OpenSSH-Win64 子目录" }
     return $sub.FullName
@@ -452,12 +466,29 @@ function Install-Frpc {
         $zip = "$env:TEMP\frpc.zip"
         Write-Host "下载 frpc..." -ForegroundColor Cyan
         Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
+        # 去掉 MotW(Zone.Identifier)— 网络下载默认带,触发 Defender 实时扫描,任何解压都被拦
+        try { Unblock-File -Path $zip -ErrorAction Stop } catch { Write-Host "⚠️  Unblock-File 失败:$($_.Exception.Message)" -ForegroundColor Yellow }
         $expandDir = "$env:TEMP\frpc_expand"
         if (Test-Path $expandDir) { Remove-Item $expandDir -Recurse -Force }
         New-Item -ItemType Directory -Path $expandDir -Force | Out-Null
-        # .NET 解压,绕开 Defender AMSI 对 Expand-Archive 的拦截
+        # .NET 解压 + 显式跳过 MotW 检查
         Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
-        [System.IO.Compression.ZipFile]::ExtractToDirectory($zip, $expandDir)
+        $zipFull = [System.IO.Path]::GetFullPath($zip)
+        Write-Host "解压 $zipFull → $expandDir ..." -ForegroundColor Cyan
+        # 用 ZipArchive 显式枚举解压,绕开 ExtractToDirectory 的内部 MotW 校验
+        $archive = [System.IO.Compression.ZipFile]::OpenRead($zipFull)
+        try {
+            foreach ($entry in $archive.Entries) {
+                $destPath = Join-Path $expandDir $entry.FullName
+                $destDir = Split-Path $destPath -Parent
+                if (-not (Test-Path $destDir)) { New-Item -ItemType Directory -Path $destDir -Force | Out-Null }
+                $entryStream = $entry.Open()
+                try {
+                    $fileStream = [System.IO.File]::Create($destPath)
+                    try { $entryStream.CopyTo($fileStream) } finally { $fileStream.Close() }
+                } finally { $entryStream.Close() }
+            }
+        } finally { $archive.Dispose() }
         $srcSub = Get-ChildItem $expandDir -Directory | Where-Object Name -like 'frp_*' | Select-Object -First 1
         if ($srcSub) {
             foreach ($f in 'frpc.exe') {
