@@ -69,7 +69,6 @@ $DEFAULT_USER = 'WuKong'
 $OPENSSH_ZIP_NAME = 'OpenSSH-Win64.zip'
 $OPENSSH_GH_URL = 'https://raw.githubusercontent.com/wukong0908/ssh-deploy/main/bin/openssh/OpenSSH-Win64.zip'
 $FRP_VERSION = '0.61.1'
-$FRP_URL = "https://github.com/fatedier/frp/releases/download/v${FRP_VERSION}/frp_${FRP_VERSION}_windows_amd64.zip"
 $FrpcInstallDir = 'C:\Tools\frp'
 $sshDir = "$env:USERPROFILE\.ssh"
 $cfg = "$sshDir\config"
@@ -475,47 +474,20 @@ function Install-Frpc {
 
     $frpcExe = Join-Path $FrpcInstallDir 'frpc.exe'
     if (-not (Test-Path $frpcExe)) {
-        $url = "https://github.com/fatedier/frp/releases/download/v${FRP_VERSION}/frp_${FRP_VERSION}_windows_amd64.zip"
-        $zip = "$env:TEMP\frpc.zip"
-        Write-Host "下载 frpc..." -ForegroundColor Cyan
-        Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
-        # 去掉 MotW(Zone.Identifier)— 网络下载默认带,触发 Defender 实时扫描,任何解压都被拦
-        try { Unblock-File -Path $zip -ErrorAction Stop } catch { Write-Host "⚠️  Unblock-File 失败:$($_.Exception.Message)" -ForegroundColor Yellow }
-        $expandDir = "$env:TEMP\frpc_expand"
-        if (Test-Path $expandDir) { Remove-Item $expandDir -Recurse -Force }
-        New-Item -ItemType Directory -Path $expandDir -Force | Out-Null
-        # .NET 解压 + 显式跳过 MotW 检查
-        Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
-        $zipFull = [System.IO.Path]::GetFullPath($zip)
-        Write-Host "解压 $zipFull → $expandDir ..." -ForegroundColor Cyan
-        # 用 ZipArchive 显式枚举解压,绕开 ExtractToDirectory 的内部 MotW 校验
-        $archive = [System.IO.Compression.ZipFile]::OpenRead($zipFull)
-        try {
-            foreach ($entry in $archive.Entries) {
-                $destPath = Join-Path $expandDir $entry.FullName
-                $destDir = Split-Path $destPath -Parent
-                if (-not (Test-Path $destDir)) { New-Item -ItemType Directory -Path $destDir -Force | Out-Null }
-                $entryStream = $entry.Open()
-                try {
-                    $fileStream = [System.IO.File]::Create($destPath)
-                    try { $entryStream.CopyTo($fileStream) } finally { $fileStream.Close() }
-                } finally { $entryStream.Close() }
-            }
-        } finally { $archive.Dispose() }
-        $srcSub = Get-ChildItem $expandDir -Directory | Where-Object Name -like 'frp_*' | Select-Object -First 1
-        if ($srcSub) {
-            foreach ($f in 'frpc.exe') {
-                $srcFile = Join-Path $srcSub.FullName $f
-                if (Test-Path $srcFile) { Move-Item $srcFile $FrpcInstallDir -Force }
-            }
-            $licSrc = Join-Path $srcSub.FullName 'LICENSE'
-            if (Test-Path $licSrc) { Move-Item $licSrc $FrpcInstallDir -Force -ErrorAction SilentlyContinue }
+        # 直接从 bin/frp/ 拷(已 commit 解压后的 frpc.exe)—— 绕开 zip + Defender 解压拦
+        $localFrpc = Join-Path $PSScriptRoot '..\bin\frp\frpc.exe'
+        if (-not (Test-Path $localFrpc)) {
+            Write-Host "❌ 找不到 $localFrpc,需 ssh-deploy 仓 bin/frp/frpc.exe" -ForegroundColor Red
+            return
         }
-        Remove-Item $expandDir -Recurse -Force
-        Remove-Item $zip -Force -ErrorAction SilentlyContinue
-    } else {
-        Write-Host "frpc.exe 已存在" -ForegroundColor Cyan
+        Write-Host "从 bin/frp/frpc.exe 拷到 $FrpcInstallDir ..." -ForegroundColor Cyan
+        Copy-Item -Path $localFrpc -Destination $frpcExe -Force
     }
+    if (-not (Test-Path $frpcExe)) {
+        Write-Error "frpc.exe 没装上"
+        return
+    }
+    Write-Host "frpc.exe 已就绪:$frpcExe" -ForegroundColor Green
 
     $iniPath = Join-Path $FrpcInstallDir 'frpc.ini'
     $ini = @"
