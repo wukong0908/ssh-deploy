@@ -509,7 +509,7 @@ server_addr = $VpsHost
 server_port = 7000
 token = $FrpToken
 
-[ssh]
+[$ServerName]
 type = tcp
 local_ip = 127.0.0.1
 local_port = 22
