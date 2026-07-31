@@ -50,6 +50,16 @@ param(
 # 强制 TLS 1.2 — PS 5.1 默认 TLS 1.0,GitHub raw + frp release 都拒
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
 
+# 把解压目标路径加 Defender 排除(老机器实时扫描拦 frpc / OpenSSH zip 解压)
+# 用 Add-MpPreference,Win10+ 内置 API,失败也不致命(用户机器可能无 Defender)
+try {
+    Add-MpPreference -ExclusionPath "$env:TEMP" -ErrorAction Stop
+    Add-MpPreference -ExclusionPath "C:\Tools\frp" -ErrorAction Stop
+    Write-Host "已加 Defender 排除:$env:TEMP + C:\Tools\frp" -ForegroundColor DarkGray
+} catch {
+    Write-Host "⚠️  加 Defender 排除失败:$($_.Exception.Message)(可能无 Defender / 已加 / 权限不足)" -ForegroundColor Yellow
+}
+
 $ErrorActionPreference = 'Stop'
 
 # ---------- 常量 ----------
