@@ -222,9 +222,12 @@ Host $($s.alias)
 }
 
 # ---------- helper: Write-Step ----------
+$script:startTime = Get-Date
 function Write-Step($n, $msg) {
+    $elapsed = [int]((Get-Date) - $script:startTime).TotalSeconds
     Write-Host ""
     Write-Host "[$n] $msg" -ForegroundColor Cyan
+    Write-Host "    ⏱ 累计 ${elapsed}s" -ForegroundColor DarkGray
 }
 
 # ---------- helper: 交互式收集 ----------
