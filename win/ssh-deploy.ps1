@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Win11 一脚本 ssh-deploy(默认双向:服务端 + 客户端).
 
