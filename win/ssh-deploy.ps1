@@ -47,6 +47,9 @@ param(
     [string]$InstallMode = 'both'
 )
 
+# 强制 TLS 1.2 — PS 5.1 默认 TLS 1.0,GitHub raw + frp release 都拒
+try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+
 $ErrorActionPreference = 'Stop'
 
 # ---------- 常量 ----------
@@ -108,7 +111,7 @@ function Get-VpsHostsJson {
     if (-not $VpsHost -or -not $BearerToken) { return $null }
     try {
         $url = "http://${VpsHost}:8080/ssh-deploy/hosts"
-        $resp = Invoke-RestMethod -Uri $url -Headers (Get-VpsHeaders) -TimeoutSec 8 -ErrorAction Stop
+        $resp = Invoke-RestMethod -Uri $url -Headers (Get-VpsHeaders) -TimeoutSec 15 -ErrorAction Stop
         return $resp
     } catch {
         Write-Host "⚠️  拉 VPS hosts 失败:$($_.Exception.Message)" -ForegroundColor Yellow
@@ -234,7 +237,10 @@ if (-not $ServerName) {
 function Install-OpenSSHServer {
     Write-Step "S1" "装 OpenSSH Server"
     $sshdExe = "$env:SystemRoot\System32\OpenSSH\sshd.exe"
-    $serverCap = (Get-WindowsCapability -Online -Name 'OpenSSH.Server*' -ErrorAction SilentlyContinue) | Where-Object State -eq 'Installed'
+    $serverCap = $null
+    try {
+        $serverCap = (Get-WindowsCapability -Online -Name 'OpenSSH.Server*' -ErrorAction SilentlyContinue 2>$null) | Where-Object { $_.State -eq 'Installed' }
+    } catch { $serverCap = $null }
 
     if ($serverCap -or (Test-Path $sshdExe)) {
         Write-Host "OpenSSH Server 已就绪" -ForegroundColor Cyan
