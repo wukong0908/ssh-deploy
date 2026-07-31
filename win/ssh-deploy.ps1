@@ -476,14 +476,24 @@ function Install-Frpc {
 
     $frpcExe = Join-Path $FrpcInstallDir 'frpc.exe'
     if (-not (Test-Path $frpcExe)) {
-        # 直接从 bin/frp/ 拷(已 commit 解压后的 frpc.exe)—— 绕开 zip + Defender 解压拦
-        $localFrpc = Join-Path $PSScriptRoot '..\bin\frp\frpc.exe'
-        if (-not (Test-Path $localFrpc)) {
-            Write-Host "❌ 找不到 $localFrpc,需 ssh-deploy 仓 bin/frp/frpc.exe" -ForegroundColor Red
+        # 用 irm 从 raw URL 拉 bundled 二进制(IRM 不带 MotW,避免 Defender 解压拦)
+        # $PSScriptRoot 在 & $ps 调用下 = $env:TEMP,不可靠,所以走网络
+        $remoteFrpc = "https://raw.githubusercontent.com/wukong0908/ssh-deploy/main/bin/frp/frpc.exe"
+        $tmpFrpc = Join-Path $env:TEMP 'frpc.exe'
+        Write-Host "下载 frpc.exe (raw,绕过 zip/解压)..." -ForegroundColor Cyan
+        try {
+            Invoke-RestMethod -Uri $remoteFrpc -OutFile $tmpFrpc -TimeoutSec 60 -ErrorAction Stop
+        } catch {
+            Write-Host "❌ 下载失败:$($_.Exception.Message)" -ForegroundColor Red
             return
         }
-        Write-Host "从 bin/frp/frpc.exe 拷到 $FrpcInstallDir ..." -ForegroundColor Cyan
-        Copy-Item -Path $localFrpc -Destination $frpcExe -Force
+        if (-not (Test-Path $tmpFrpc) -or (Get-Item $tmpFrpc).Length -lt 1MB) {
+            Write-Host "❌ 下载文件大小异常,放弃" -ForegroundColor Red
+            return
+        }
+        Write-Host "拷到 $FrpcInstallDir ..." -ForegroundColor Cyan
+        Copy-Item -Path $tmpFrpc -Destination $frpcExe -Force
+        Remove-Item $tmpFrpc -Force -ErrorAction SilentlyContinue
     }
     if (-not (Test-Path $frpcExe)) {
         Write-Error "frpc.exe 没装上"
