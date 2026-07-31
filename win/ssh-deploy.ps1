@@ -47,6 +47,9 @@ param(
     [string]$InstallMode = 'both'
 )
 
+# 启动计时(最先,任何慢操作之前)
+$script:startTime = Get-Date
+
 # 强制 TLS 1.2 — PS 5.1 默认 TLS 1.0,GitHub raw + frp release 都拒
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
 
@@ -231,7 +234,6 @@ Host $($s.alias)
 }
 
 # ---------- helper: Write-Step ----------
-$script:startTime = Get-Date
 function Write-Step($n, $msg) {
     $elapsed = [int]((Get-Date) - $script:startTime).TotalSeconds
     Write-Host ""
