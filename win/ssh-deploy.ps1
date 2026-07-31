@@ -10,7 +10,7 @@
     主菜单:
       [1] Install (default: server + client both)
       [2] Status
-      [3] Switch (重命名 alias)
+      [3] Switch (重拉 VPS 清单,重写 ~/.ssh/config + PowerShell alias)
       [4] Register this host to VPS directory
       [5] Unregister this host
       [0] Exit
@@ -53,14 +53,22 @@ $script:startTime = Get-Date
 # 强制 TLS 1.2 — PS 5.1 默认 TLS 1.0,GitHub raw + frp release 都拒
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
 
-# 把解压目标路径加 Defender 排除(老机器实时扫描拦 frpc / OpenSSH zip 解压)
-# 用 Add-MpPreference,Win10+ 内置 API,失败也不致命(用户机器可能无 Defender)
+# Defender 排除:OpenSSH zip 解压到 $TEMP,frpc.exe 是常见 PUA 检测目标
+# 失败不致命(无 Defender / 已加 / 权限不足)
 try {
     Add-MpPreference -ExclusionPath "$env:TEMP" -ErrorAction Stop
     Add-MpPreference -ExclusionPath "C:\Tools\frp" -ErrorAction Stop
-    Write-Host "已加 Defender 排除:$env:TEMP + C:\Tools\frp" -ForegroundColor DarkGray
-} catch {
-    Write-Host "⚠️  加 Defender 排除失败:$($_.Exception.Message)(可能无 Defender / 已加 / 权限不足)" -ForegroundColor Yellow
+} catch { }
+
+# 显式 assert 管理员(icacls / sc create / Copy-Item → System32 都要 admin)
+function Test-Administrator {
+    $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $pr = New-Object Security.Principal.WindowsPrincipal($id)
+    return $pr.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+if (-not (Test-Administrator)) {
+    Write-Host "❌ 需管理员 PowerShell(右键 '终端(管理员)')" -ForegroundColor Red
+    exit 1
 }
 
 $ErrorActionPreference = 'Stop'
@@ -71,7 +79,6 @@ $DEFAULT_PORT = 6000
 $DEFAULT_USER = 'WuKong'
 $OPENSSH_ZIP_NAME = 'OpenSSH-Win64.zip'
 $OPENSSH_GH_URL = 'https://raw.githubusercontent.com/wukong0908/ssh-deploy/main/bin/openssh/OpenSSH-Win64.zip'
-$FRP_VERSION = '0.61.1'
 $FrpcInstallDir = 'C:\Tools\frp'
 $sshDir = "$env:USERPROFILE\.ssh"
 $cfg = "$sshDir\config"
@@ -79,16 +86,6 @@ $cfg = "$sshDir\config"
 # ---------- helper: OpenSSH zip ----------
 function Get-OpenSSHZip {
     param([string]$WorkDir)
-    if ($PSCommandPath) {
-        $scriptDir = Split-Path $PSCommandPath -Parent
-        $candidates = @(
-            (Join-Path $scriptDir "..\bin\openssh\$OPENSSH_ZIP_NAME"),
-            (Join-Path $scriptDir "bin\openssh\$OPENSSH_ZIP_NAME")
-        )
-        foreach ($p in $candidates) {
-            if (Test-Path $p) { return @{ path = $p; source = 'local' } }
-        }
-    }
     $localZip = Join-Path $WorkDir $OPENSSH_ZIP_NAME
     if (Test-Path $localZip -PathType Leaf) {
         return @{ path = $localZip; source = 'cached' }
@@ -108,14 +105,13 @@ function Expand-OpenSSHZip {
     $expandDir = Join-Path $ExpandRoot 'openssh_expand'
     if (Test-Path $expandDir) { Remove-Item $expandDir -Recurse -Force }
     New-Item -ItemType Directory -Path $expandDir -Force | Out-Null
-    # 网络下载的 zip 带 MotW(Zone.Identifier),Defender 实时扫描 → 解压拦
-    try { Unblock-File -Path $ZipPath -ErrorAction Stop } catch {}
     Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
     $zipFull = [System.IO.Path]::GetFullPath($ZipPath)
     # 用 ZipArchive 显式枚举解压(ExtractToDirectory 在某些 Defender 版本仍被拦)
     $archive = [System.IO.Compression.ZipFile]::OpenRead($zipFull)
     try {
         foreach ($entry in $archive.Entries) {
+            if (-not $entry.Name) { continue }  # 跳目录条目(最后一段 Name 为空)
             $destPath = Join-Path $expandDir $entry.FullName
             $destDir = Split-Path $destPath -Parent
             if (-not (Test-Path $destDir)) { New-Item -ItemType Directory -Path $destDir -Force | Out-Null }
@@ -138,7 +134,7 @@ function Get-VpsHeaders {
 }
 
 function Get-VpsHostsJson {
-    if (-not $VpsHost -or -not $BearerToken) { return $null }
+    if (-not $BearerToken) { return $null }
     try {
         $url = "http://${VpsHost}:8080/ssh-deploy/hosts"
         $resp = Invoke-RestMethod -Uri $url -Headers (Get-VpsHeaders) -TimeoutSec 15 -ErrorAction Stop
@@ -150,8 +146,8 @@ function Get-VpsHostsJson {
 }
 
 function Register-ThisHost {
-    if (-not $VpsHost -or -not $BearerToken) {
-        Write-Host "需要 -VpsHost + -BearerToken" -ForegroundColor Yellow
+    if (-not $BearerToken) {
+        Write-Host "需要 -BearerToken" -ForegroundColor Yellow
         return
     }
     $payload = @{
@@ -172,8 +168,8 @@ function Register-ThisHost {
 }
 
 function Unregister-ThisHost {
-    if (-not $VpsHost -or -not $BearerToken) {
-        Write-Host "需要 -VpsHost + -BearerToken" -ForegroundColor Yellow
+    if (-not $BearerToken) {
+        Write-Host "需要 -BearerToken" -ForegroundColor Yellow
         return
     }
     $payload = @{ name = $ServerName } | ConvertTo-Json -Compress
@@ -188,7 +184,6 @@ function Unregister-ThisHost {
 
 # ---------- helper: SSH config 生成 ----------
 function Generate-SSHConfigFromVPS {
-    param([string]$DefaultVps)
     $hosts = Get-VpsHostsJson
     if (-not $hosts -or -not $hosts.servers) {
         Write-Host "VPS 无主机清单(空或拉取失败),跳过 SSH config 生成" -ForegroundColor Yellow
@@ -212,7 +207,7 @@ function Generate-SSHConfigFromVPS {
 
     # 逐 server 写
     foreach ($s in $hosts.servers) {
-        $vps = if ($s.vps_host) { $s.vps_host } else { $DefaultVps }
+        $vps = if ($s.vps_host) { $s.vps_host } else { $VpsHost }
         $segment = @"
 
 # ===== ssh-deploy: $($s.name) =====
@@ -248,7 +243,9 @@ if (-not $VpsHost) {
 }
 if (-not $BearerToken) {
     $BearerToken = Read-Host "ssh-deploy-api Bearer token(留空=不调 VPS API)"
-    if (-not $BearerToken) { $BearerToken = '' }
+}
+if (-not $FrpToken) {
+    $FrpToken = Read-Host "FRPS 双向校验 token(留空=跳过 frpc 配置)"
 }
 if ($FrpSshPort -le 0) {
     $portInput = Read-Host "FRP SSH 转发端口 [$DEFAULT_PORT]"
@@ -258,7 +255,6 @@ if (-not $LocalUser) {
     $userInput = Read-Host "本机 Win11 账号用户名 [$DEFAULT_USER]"
     if ($userInput) { $LocalUser = $userInput } else { $LocalUser = $DEFAULT_USER }
 }
-if (-not $LocalUser) { Write-Error "用户名不能为空" }
 if (-not $ServerName) {
     $defaultName = $env:COMPUTERNAME.ToLower()
     $nameInput = Read-Host "VPS 注册名 [$defaultName]"
@@ -328,7 +324,6 @@ endlocal
 "@
         [System.IO.File]::WriteAllText($tmpBat, $writeScript, [System.Text.UTF8Encoding]::new($false))
         # 当前已是管理员,直接同步跑 bat — 不走 schtasks /RU SYSTEM(老机器常禁 SeBatchLogonRight)
-        Write-Host "跑 OpenSSH 装 bat(管理员上下文同步执行)..." -ForegroundColor Cyan
         $p = Start-Process cmd.exe -ArgumentList '/c', "`"$tmpBat`"" -Wait -PassThru -NoNewWindow -ErrorAction Stop
         if ($p.ExitCode -ne 0) {
             Write-Host "⚠️  bat exit=$($p.ExitCode)" -ForegroundColor Yellow
@@ -345,7 +340,6 @@ endlocal
         Add-WindowsCapability -Online -Name 'OpenSSH.Server~~~~0.0.1.0' | Out-Null
     }
     Start-Sleep -Seconds 3
-    Set-Service sshd -StartupType Automatic
 }
 
 # ---------- 2. sshd_config: PasswordAuthentication + 删 Match ----------
@@ -376,6 +370,10 @@ copy /Y "$tmpNew" "$cfgPath" >> "%LOG%" 2>&1
 icacls "$cfgPath" /inheritance:r >> "%LOG%" 2>&1
 icacls "$cfgPath" /grant:r "NT AUTHORITY\SYSTEM:(R)" "BUILTIN\Administrators:(R)" >> "%LOG%" 2>&1
 "C:\Windows\System32\OpenSSH\sshd.exe" -t -f "$cfgPath" >> "%LOG%" 2>&1
+if errorlevel 1 (
+    echo sshd_config_VALIDATION_FAILED >> "%LOG%"
+    exit /b 1
+)
 sc start sshd >> "%LOG%" 2>&1
 ping -n 3 127.0.0.1 >nul
 sc query sshd >> "%LOG%" 2>&1
@@ -383,15 +381,18 @@ endlocal
 "@
     [System.IO.File]::WriteAllText($tmpBat, $writeScript, [System.Text.UTF8Encoding]::new($false))
     # 当前已是管理员,直接同步跑 bat — 不走 schtasks /RU SYSTEM(老机器 LTSC 常禁 SeBatchLogonRight,导致 bat 永不启动 → log 不写)
-    Write-Host "跑 sshd_config bat(管理员上下文同步执行)..." -ForegroundColor Cyan
     $p = Start-Process cmd.exe -ArgumentList '/c', "`"$tmpBat`"" -Wait -PassThru -NoNewWindow -ErrorAction Stop
-    if ($p.ExitCode -ne 0) {
-        Write-Host "⚠️  bat exit=$($p.ExitCode),继续读日志" -ForegroundColor Yellow
-    }
     if (Test-Path $logPath) {
         Get-Content $logPath
+        if (Select-String -Path $logPath -Pattern 'sshd_config_VALIDATION_FAILED' -ErrorAction SilentlyContinue) {
+            Write-Error "sshd 配置校验失败 — 改 $cfgPath 后重跑"
+            return
+        }
     } else {
         Write-Host "❌ bat 没写 log,看 stdout/cmd 错误" -ForegroundColor Red
+    }
+    if ($p.ExitCode -ne 0) {
+        Write-Host "⚠️  bat exit=$($p.ExitCode)" -ForegroundColor Yellow
     }
     Remove-Item $tmpBat -Force -ErrorAction SilentlyContinue
 
@@ -476,8 +477,7 @@ function Install-Frpc {
 
     $frpcExe = Join-Path $FrpcInstallDir 'frpc.exe'
     if (-not (Test-Path $frpcExe)) {
-        # 用 irm 从 raw URL 拉 bundled 二进制(IRM 不带 MotW,避免 Defender 解压拦)
-        # $PSScriptRoot 在 & $ps 调用下 = $env:TEMP,不可靠,所以走网络
+        # 直接拉 .exe(raw URL),无 zip → 绕开 Defender 解压扫描
         $remoteFrpc = "https://raw.githubusercontent.com/wukong0908/ssh-deploy/main/bin/frp/frpc.exe"
         $tmpFrpc = Join-Path $env:TEMP 'frpc.exe'
         Write-Host "下载 frpc.exe (raw,绕过 zip/解压)..." -ForegroundColor Cyan
@@ -487,17 +487,13 @@ function Install-Frpc {
             Write-Host "❌ 下载失败:$($_.Exception.Message)" -ForegroundColor Red
             return
         }
-        if (-not (Test-Path $tmpFrpc) -or (Get-Item $tmpFrpc).Length -lt 1MB) {
+        if ((Get-Item $tmpFrpc).Length -lt 1MB) {
             Write-Host "❌ 下载文件大小异常,放弃" -ForegroundColor Red
             return
         }
         Write-Host "拷到 $FrpcInstallDir ..." -ForegroundColor Cyan
         Copy-Item -Path $tmpFrpc -Destination $frpcExe -Force
         Remove-Item $tmpFrpc -Force -ErrorAction SilentlyContinue
-    }
-    if (-not (Test-Path $frpcExe)) {
-        Write-Error "frpc.exe 没装上"
-        return
     }
     Write-Host "frpc.exe 已就绪:$frpcExe" -ForegroundColor Green
 
@@ -564,7 +560,7 @@ function Test-AccountAndRestartSshd {
 
 # ---------- 7. PowerShell alias ----------
 function Add-PowerShellAliases {
-    Write-Step "C2" "配置 PowerShell alias(wpc-* 一键 SSH)"
+    Write-Step "C3" "配置 PowerShell alias(wpc-* 一键 SSH)"
     $profileDir = Split-Path $PROFILE -Parent
     if (-not (Test-Path $profileDir)) { New-Item -ItemType Directory -Path $profileDir -Force | Out-Null }
     if (-not (Test-Path $PROFILE)) { New-Item -ItemType File -Path $PROFILE -Force | Out-Null }
@@ -659,7 +655,7 @@ function Show-Status {
 function Switch-Alias {
     Write-Host ""
     Write-Host "Switch:重新拉 VPS 清单 + 重写 ~/.ssh/config + PowerShell alias" -ForegroundColor Cyan
-    Generate-SSHConfigFromVPS -DefaultVps $VpsHost
+    Generate-SSHConfigFromVPS
     Add-PowerShellAliases
     Write-Host "✅ switch 完成。重启 PowerShell 后生效。" -ForegroundColor Green
 }
@@ -679,7 +675,7 @@ function Invoke-Install {
         Install-OpenSSHClient
         # 拉 VPS 清单 → 写 config
         Write-Step "C2" "拉 VPS 主机清单 → 写 ~/.ssh/config"
-        Generate-SSHConfigFromVPS -DefaultVps $VpsHost
+        Generate-SSHConfigFromVPS
         Add-PowerShellAliases
     }
     Write-Host ""
@@ -694,7 +690,7 @@ function Invoke-Install {
         Write-Host "  VPS 主机数:从 VPS 拉 → ~/.ssh/config 多 Host wpc-* 段" -ForegroundColor Green
     }
     # 可选 register
-    if ($VpsHost -and $BearerToken) {
+    if ($BearerToken) {
         Write-Host ""
         $ans = Read-Host "要立即把本机 register 到 VPS 目录吗? [y/N]"
         if ($ans -eq 'y' -or $ans -eq 'Y') {
@@ -730,7 +726,7 @@ function Show-Menu {
 }
 
 # ---------- 入口 ----------
-if ($InstallMode -or $VpsHost -or $BearerToken) {
+if ($PSBoundParameters.Count -gt 0) {
     # 传参跑 → 直接 install(可脚本化)
     Invoke-Install
 } else {

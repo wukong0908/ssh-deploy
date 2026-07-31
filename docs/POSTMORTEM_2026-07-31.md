@@ -41,3 +41,14 @@
 - D3: Termux 装客户端验证外机通
 - D4: 主人机设密码 `net user WuKong *` 让 SSH 密码登录通
 - 安全:Bearer token / FRPS token 轮换(本对话历史暴露,改新值)
+
+## 清理(2026-07-31 23:30Z)
+
+8 坑修完后,主人要求"优化和完善脚本,删除无用 / 冗余内容"。最小侵入式 cleanup:
+
+- 删除:`$FRP_VERSION` 孤儿常量 / `$PSCommandPath` local-zip lookup / `Unblock-File` 死防御 / `if (-not $BearerToken) { $BearerToken = '' }` no-op / unreachable `LocalUser` 空检查 / unreachable `frpcExe` 二次检查
+- 简化:`if (-not $VpsHost -or -not $BearerToken)` → `if (-not $BearerToken)`($VpsHost 早 fallback);`Get-VpsHostsJson` 加 script-scope cache(`$script:vpsHosts`)避免 4 处重复拉
+- 修 bug:`frpc.exe` 路径不可达时无 FrpToken 提示 → 加 `Read-Host`;sshd_config 校验失败静默继续 → bat 写 `sshd_config_VALIDATION_FAILED` 行 + PS 读后 `Write-Error` 早退;ZipArchive 目录条目导致 `目录名称无效` → 加 `if (-not $entry.Name) continue`
+- 修入口:无参跑菜单(`$PSBoundParameters.Count -gt 0` 改)
+- 加 admin assertion:`Test-Administrator` + `exit 1` 早退
+- 文件:738 → 733 行(净删 5 行,加 6 处实质改动)

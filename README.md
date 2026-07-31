@@ -92,7 +92,7 @@ ssh wpc-dev    # 进老机器
 ========== ssh-deploy (DESKTOP-WK) =========
   [1] Install (default: server + client both)
   [2] Status
-  [3] Switch (重拉 VPS 清单)
+  [3] Switch (重拉 VPS 清单,重写 ~/.ssh/config + PowerShell alias)
   [4] Register this host to VPS directory
   [5] Unregister this host
   [0] Exit
