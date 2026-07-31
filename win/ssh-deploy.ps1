@@ -295,13 +295,17 @@ echo END >> "%LOG%"
 endlocal
 "@
         [System.IO.File]::WriteAllText($tmpBat, $writeScript, [System.Text.UTF8Encoding]::new($false))
-        $startTime = (Get-Date).AddMinutes(1).ToString('HH:mm')
-        $taskName = "OpenSSHInstall_$((Get-Date).Ticks)"
-        schtasks /Create /TN $taskName /SC ONCE /ST $startTime /RU SYSTEM /RL HIGHEST /TR "cmd.exe /c `"$tmpBat`"" /F | Out-Null
-        schtasks /Run /TN $taskName | Out-Null
-        Start-Sleep -Seconds 15
-        schtasks /Delete /TN $taskName /F | Out-Null
-        Get-Content $logPath
+        # 当前已是管理员,直接同步跑 bat — 不走 schtasks /RU SYSTEM(老机器常禁 SeBatchLogonRight)
+        Write-Host "跑 OpenSSH 装 bat(管理员上下文同步执行)..." -ForegroundColor Cyan
+        $p = Start-Process cmd.exe -ArgumentList '/c', "`"$tmpBat`"" -Wait -PassThru -NoNewWindow -ErrorAction Stop
+        if ($p.ExitCode -ne 0) {
+            Write-Host "⚠️  bat exit=$($p.ExitCode)" -ForegroundColor Yellow
+        }
+        if (Test-Path $logPath) {
+            Get-Content $logPath
+        } else {
+            Write-Host "❌ bat 没写 log" -ForegroundColor Red
+        }
         Remove-Item $tmpBat -Force -ErrorAction SilentlyContinue
         Write-Host "✅ OpenSSH Server 装完" -ForegroundColor Green
     } else {
@@ -339,20 +343,24 @@ ping -n 3 127.0.0.1 >nul
 copy /Y "$tmpNew" "$cfgPath" >> "%LOG%" 2>&1
 icacls "$cfgPath" /inheritance:r >> "%LOG%" 2>&1
 icacls "$cfgPath" /grant:r "NT AUTHORITY\SYSTEM:(R)" "BUILTIN\Administrators:(R)" >> "%LOG%" 2>&1
-"C:\Program Files\OpenSSH\sshd.exe" -t -f "$cfgPath" >> "%LOG%" 2>&1
+"C:\Windows\System32\OpenSSH\sshd.exe" -t -f "$cfgPath" >> "%LOG%" 2>&1
 sc start sshd >> "%LOG%" 2>&1
 ping -n 3 127.0.0.1 >nul
 sc query sshd >> "%LOG%" 2>&1
 endlocal
 "@
     [System.IO.File]::WriteAllText($tmpBat, $writeScript, [System.Text.UTF8Encoding]::new($false))
-    $startTime = (Get-Date).AddMinutes(1).ToString('HH:mm')
-    $taskName = "SshdSetup_$((Get-Date).Ticks)"
-    schtasks /Create /TN $taskName /SC ONCE /ST $startTime /RU SYSTEM /RL HIGHEST /TR "cmd.exe /c `"$tmpBat`"" /F | Out-Null
-    schtasks /Run /TN $taskName | Out-Null
-    Start-Sleep -Seconds 15
-    schtasks /Delete /TN $taskName /F | Out-Null
-    Get-Content $logPath
+    # 当前已是管理员,直接同步跑 bat — 不走 schtasks /RU SYSTEM(老机器 LTSC 常禁 SeBatchLogonRight,导致 bat 永不启动 → log 不写)
+    Write-Host "跑 sshd_config bat(管理员上下文同步执行)..." -ForegroundColor Cyan
+    $p = Start-Process cmd.exe -ArgumentList '/c', "`"$tmpBat`"" -Wait -PassThru -NoNewWindow -ErrorAction Stop
+    if ($p.ExitCode -ne 0) {
+        Write-Host "⚠️  bat exit=$($p.ExitCode),继续读日志" -ForegroundColor Yellow
+    }
+    if (Test-Path $logPath) {
+        Get-Content $logPath
+    } else {
+        Write-Host "❌ bat 没写 log,看 stdout/cmd 错误" -ForegroundColor Red
+    }
     Remove-Item $tmpBat -Force -ErrorAction SilentlyContinue
 
     $svc = Get-Service sshd
