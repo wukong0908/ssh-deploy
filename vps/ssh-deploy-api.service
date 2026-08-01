@@ -8,7 +8,9 @@ User=sshdeploy
 Group=sshdeploy
 EnvironmentFile=/etc/ssh-deploy/ssh-deploy.env
 WorkingDirectory=/opt/ssh-deploy
-ExecStart=/usr/bin/python3 /opt/ssh-deploy/server.py
+# 不硬编码 /usr/bin/python3 — Alpine/RHEL/Amazon Linux 路径不同
+# 用 sh -c 包一层 + which 解析,跨发行版兼容
+ExecStart=/bin/sh -c 'exec "$(command -v python3)" /opt/ssh-deploy/server.py'
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal

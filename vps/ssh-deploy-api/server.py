@@ -16,6 +16,7 @@ import json
 import os
 import sys
 import threading
+import hmac
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
@@ -55,7 +56,9 @@ def _check_auth(handler):
         handler.wfile.write(b'{"error":"server token not configured"}')
         return False
     auth = handler.headers.get("Authorization", "")
-    if auth != f"Bearer {TOKEN}":
+    expected = f"Bearer {TOKEN}"
+    # 用 constant-time 比较防 timing leak(短 token 仍走快路径的旁路)
+    if not hmac.compare_digest(auth, expected):
         handler.send_response(403)
         handler.send_header("Content-Type", "application/json")
         handler.end_headers()
@@ -188,7 +191,9 @@ def main():
     os.makedirs(DATA_DIR, exist_ok=True)
     if not os.path.exists(DATA_FILE):
         _save({"version": "1.0", "servers": []})
-        os.chmod(DATA_FILE, 0o644)
+    # 0o640 — owner (sshdeploy) rw + group rx, 去掉 other 读 (内网拓扑不外泄)
+    # 老文件也一并收紧(覆盖 0o644 历史默认)
+    os.chmod(DATA_FILE, 0o640)
     port = int(os.environ.get("API_PORT", "8081"))
     addr = ("127.0.0.1", port)
     print(f"ssh-deploy-api listening on {addr[0]}:{addr[1]}", file=sys.stderr)

@@ -75,7 +75,6 @@ collect_interactive() {
         # token 仍可能从外面传(但非交互下推荐传参)
         warn "stdin 非 TTY,使用 -v / -t 传参或 DEFAULT_VPS"
     fi
-    : "${VPS_HOST:=$DEFAULT_VPS}"
 }
 
 # ---------- 1. OpenSSH Client ----------

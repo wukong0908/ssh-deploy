@@ -63,10 +63,15 @@ scp vps/nginx-ssh-deploy.conf root@8.163.106.31:/etc/nginx/conf.d/ssh-deploy.con
 ssh root@8.163.106.31 '
   # 把 nginx conf 里的 "YOUR_TOKEN_HERE" 替成步骤 3 的 token
   sed -i "s/YOUR_TOKEN_HERE/wukong_ssh_2026_secret_xxx/" /etc/nginx/conf.d/ssh-deploy.conf
+  # ⚠️  nginx conf 现含明文 token — 收紧权限,别让 nginx worker / 其他用户读到
+  chmod 640 /etc/nginx/conf.d/ssh-deploy.conf
+  chown root:sshdeploy /etc/nginx/conf.d/ssh-deploy.conf
   nginx -t
   systemctl reload nginx
 '
 ```
+
+> **nginx conf 含明文 token 风险**:默认 644 任何用户可读。chmod 640 + group=sshdeploy 后,仅 root + sshdeploy 用户可读。**token 泄露面**:`cp / tar / chattr / git` 操作时误带;改走 unix socket + header 校验可根除(留待 v2)。
 
 ## 6. 防火墙放 8080
 

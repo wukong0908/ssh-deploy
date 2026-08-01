@@ -52,6 +52,9 @@ param(
 # 启动计时(最先,任何慢操作之前)
 $script:startTime = Get-Date
 
+# 路径常量(前置,Defender 排除用)
+$FrpcInstallDir = 'C:\frp'
+
 # 强制 TLS 1.2 — PS 5.1 默认 TLS 1.0,GitHub raw + frp release 都拒
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
 
@@ -59,7 +62,7 @@ try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::
 # 失败不致命(无 Defender / 已加 / 权限不足)
 try {
     Add-MpPreference -ExclusionPath "$env:TEMP" -ErrorAction Stop
-    Add-MpPreference -ExclusionPath "C:\Tools\frp" -ErrorAction Stop
+    Add-MpPreference -ExclusionPath $FrpcInstallDir -ErrorAction Stop
 } catch { }
 
 # 显式 assert 管理员(icacls / sc create / Copy-Item → System32 都要 admin)
@@ -81,7 +84,6 @@ $DEFAULT_PORT = 6000
 $DEFAULT_USER = 'WuKong'
 $OPENSSH_ZIP_NAME = 'OpenSSH-Win64.zip'
 $OPENSSH_GH_URL = 'https://raw.githubusercontent.com/wukong0908/ssh-deploy/main/bin/openssh/OpenSSH-Win64.zip'
-$FrpcInstallDir = 'C:\frp'
 $sshDir = "$env:USERPROFILE\.ssh"
 $cfg = "$sshDir\config"
 $DEFAULT_TOKEN_CACHE = Join-Path $sshDir 'deploy-secrets.md'
@@ -203,6 +205,8 @@ function Get-VpsHeaders {
 }
 
 function Get-VpsHostsJson {
+    # VpsHost 缺时填默认(Status 流程不调 Get-*Params)
+    if (-not $VpsHost) { $VpsHost = $DEFAULT_VPS; $script:VpsHost = $DEFAULT_VPS }
     # Bearer 缺时,从 token 文档补救(Status 流程不调 Get-*Params,必须自动读)
     if (-not $BearerToken -and $TokenFile) {
         $auto = Get-TokenFromFile -FilePath $TokenFile -Key 'BEARER_TOKEN'
@@ -229,7 +233,7 @@ function Register-ThisHost {
     Get-RegisterParams
     if (-not $BearerToken) {
         Write-Host "需要 -BearerToken" -ForegroundColor Yellow
-        return
+        return $false
     }
     $payload = @{
         name = $ServerName
@@ -243,6 +247,7 @@ function Register-ThisHost {
         $url = "http://${VpsHost}:8080/ssh-deploy/register"
         $resp = Invoke-RestMethod -Uri $url -Method POST -ContentType 'application/json' -Headers (Get-VpsHeaders) -Body $payload -TimeoutSec 8 -ErrorAction Stop
         Write-Host "✅ 已注册 $($resp.registered.name) → port $($resp.registered.ssh_port) user $($resp.registered.ssh_user)" -ForegroundColor Green
+        return $true
     } catch {
         $err = $_
         # 409 端口冲突:VPS API 返回 error.detail,告诉主人换端口
@@ -258,10 +263,11 @@ function Register-ThisHost {
                 } catch {
                     Write-Host "❌ 端口冲突(409)" -ForegroundColor Red
                 }
-                return
+                return $false
             }
         }
         Write-Host "❌ register 失败:$($err.Exception.Message)" -ForegroundColor Red
+        return $false
     }
 }
 
@@ -533,7 +539,7 @@ echo END >> "%LOG%"
 endlocal
 "@
         [System.IO.File]::WriteAllText($tmpBat, $writeScript, [System.Text.UTF8Encoding]::new($false))
-        # 当前已是管理员,直接同步跑 bat — 不走 schtasks /RU SYSTEM(老机器常禁 SeBatchLogonRight)
+        # 当前已是管理员,直接同步跑 bat
         $p = Start-Process cmd.exe -ArgumentList '/c', "`"$tmpBat`"" -Wait -PassThru -NoNewWindow -ErrorAction Stop
         if ($p.ExitCode -ne 0) {
             Write-Host "⚠️  bat exit=$($p.ExitCode)" -ForegroundColor Yellow
@@ -590,7 +596,7 @@ sc query sshd >> "%LOG%" 2>&1
 endlocal
 "@
     [System.IO.File]::WriteAllText($tmpBat, $writeScript, [System.Text.UTF8Encoding]::new($false))
-    # 当前已是管理员,直接同步跑 bat — 不走 schtasks /RU SYSTEM(老机器 LTSC 常禁 SeBatchLogonRight,导致 bat 永不启动 → log 不写)
+    # 当前已是管理员,直接同步跑 bat
     $p = Start-Process cmd.exe -ArgumentList '/c', "`"$tmpBat`"" -Wait -PassThru -NoNewWindow -ErrorAction Stop
     if (Test-Path $logPath) {
         Get-Content $logPath
@@ -901,18 +907,15 @@ function Show-Status {
     # 中文 win11 /NH 仍输出 header 行,Where-Object 过滤 frpc.exe 行(不靠 -First 1)
     $frpcLine = (tasklist /FI "IMAGENAME eq frpc.exe" /NH 2>$null) | Where-Object { $_ -match 'frpc\.exe' } | Select-Object -First 1
     $frpcTask = Get-ScheduledTask frpc-bg -ErrorAction SilentlyContinue
-    if (-not $frpcTask) {
-        # 兼容 ssh-deploy 老版本自创的 frpc-autostart
-        $frpcTask = Get-ScheduledTask frpc-autostart -ErrorAction SilentlyContinue
-    }
     if ($frpcLine -and $frpcLine -match 'frpc\.exe\s+(\d+)') {
         Write-Host "frpc: PID $($Matches[1]) running" -ForegroundColor Green
     } else {
         Write-Host "frpc: 未跑" -ForegroundColor Yellow
     }
     if ($frpcTask) {
-        $taskName = $frpcTask.TaskName
-        Write-Host "frpc plan task: $taskName ($($frpcTask.State))" -ForegroundColor Green
+        Write-Host "frpc plan task: frpc-bg ($($frpcTask.State))" -ForegroundColor Green
+    } else {
+        Write-Host "frpc plan task: 未注册" -ForegroundColor Yellow
     }
     # 22 端口
     $conn = Get-NetTCPConnection -LocalPort 22 -State Listen -ErrorAction SilentlyContinue
@@ -986,9 +989,13 @@ function Invoke-Install {
         Write-Host "  本机 ssh:  $(Get-Command ssh | Select-Object -ExpandProperty Source)" -ForegroundColor Green
         Write-Host "  VPS 主机数:从 VPS 拉 → ~/.ssh/config 多 Host wpc-* 段" -ForegroundColor Green
     }
-    # 自动 register(有 Bearer 就调,失败不致命)
+    # 自动 register(有 Bearer 就调,失败不致命但提示)
     if ($BearerToken) {
-        Register-ThisHost
+        $regOk = Register-ThisHost
+        if (-not $regOk) {
+            Write-Host ""
+            Write-Host "⚠️  本机未注册到 VPS。稍后重跑菜单 [3] 把本机登记到 VPS" -ForegroundColor Yellow
+        }
     }
     Write-Host "============================================" -ForegroundColor Green
 }
@@ -1156,12 +1163,11 @@ function Show-Menu {
         Write-Host "  [0] Exit"
         Write-Host "===========================================" -ForegroundColor Cyan
         $choice = Read-Host "选择 [0-6]"
-        # 兜底:任何不调 Get-*Params 的菜单项(1 VPS 状态)也能跑
-        if (-not $script:VpsHost) { $script:VpsHost = $DEFAULT_VPS }
+        # Status 路径也走 Get-VpsHostsJson,内部自动从 token 文件补 Bearer,VpsHost 兜底在 Get-*Params 内
         switch ($choice) {
             '1' { Show-Status }
             '2' { Invoke-Install }
-            '3' { Register-ThisHost }
+            '3' { [void](Register-ThisHost) }
             '4' { Unregister-ThisHost }
             '5' { Unregister-AnyHost }
             '6' { Invoke-Uninstall }

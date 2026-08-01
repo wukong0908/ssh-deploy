@@ -90,11 +90,12 @@ ssh wpc-dev    # 进老机器
 
 ```
 ========== ssh-deploy (DESKTOP-WK) =========
-  [1] Install (default: server + client both)
-  [2] Status
-  [3] Switch (重拉 VPS 清单,重写 ~/.ssh/config + PowerShell alias)
-  [4] Register this host to VPS directory
-  [5] Unregister this host
+  [1] VPS 状态(云端所有主机 + 本机 sshd/frpc/port/config + 同步 alias)
+  [2] Install 本机(server + client)
+  [3] 把本机登记到 VPS
+  [4] 从 VPS 注销本机
+  [5] 从 VPS 注销任意主机
+  [6] Uninstall 本机(清 sshd/frpc/schtasks/config/alias + VPS 注销)
   [0] Exit
 ==========================================
 ```
@@ -108,7 +109,7 @@ VPS:    8.163.106.31
 sshd: Running / Automatic       ← 服务端
 ssh.exe: C:\Windows\System32\OpenSSH\ssh.exe
 frpc: PID 1234 running          ← frpc 转发 22→6000
-frpc-autostart: Ready
+frpc plan task: frpc-bg (Ready)
 port 22: LISTEN
 
 --- VPS 注册主机 ---
@@ -267,7 +268,7 @@ v1 单主机版 `host/setup-windows.ps1` + `client/deploy-windows.ps1` + `client
 - [ ] `Get-Service sshd` → Running
 - [ ] `Get-NetTCPConnection -LocalPort 22` → Listen
 - [ ] `Get-Process frpc` → PID 存在
-- [ ] `Get-ScheduledTask frpc-autostart` → Ready
+- [ ] `Get-ScheduledTask frpc-bg` → Ready
 - [ ] `ssh <user>@127.0.0.1` → 输密码 → 进 shell
 - [ ] VPS hosts.json 有本机条目:`curl -H "Authorization: Bearer $TOKEN" http://8.163.106.31:8080/ssh-deploy/hosts | jq`
 
