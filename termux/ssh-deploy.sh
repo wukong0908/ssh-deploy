@@ -114,26 +114,20 @@ fetch_vps_hosts() {
     echo "$resp"
 }
 
-# 用 Python (Termux 自带,或装 python)解析 JSON — 避免 jq 依赖
+# JSON → TSV: 用 grep + sed + paste 拆每个 server 对象,避免依赖 python/jq
+# 输入: VPS 返回的 {"servers":[{...},{...}]}
+# 输出: 每 4 行 → 1 行 TSV: name\tport\tuser\talias
+# vps_host 不输出(所有 server 都走同一 $VPS_HOST,留空字段会触发 bash IFS 空吞 bug)
 parse_hosts() {
-    python3 - "$1" <<'PYEOF'
-import json, sys
-data = json.loads(sys.argv[1])
-for s in data.get('servers', []):
-    print(f"{s.get('name','')}\t{s.get('vps_host','')}\t{s.get('ssh_port','')}\t{s.get('ssh_user','')}\t{s.get('alias','')}")
-PYEOF
+    echo "$1" | grep -oE '"(name|ssh_port|ssh_user|alias)":[[:space:]]*("[^"]*"|[0-9]+)' \
+        | sed -E 's/^"(name|ssh_port|ssh_user|alias)":[[:space:]]*//; s/^"(.*)"$/\1/; s/"$//' \
+        | paste - - - -
 }
 
 generate_ssh_config() {
     step "2/3 拉 VPS 主机清单 → 写 ~/.ssh/config"
     local json
     json=$(fetch_vps_hosts) || { warn "VPS 拉取失败,SSH config 不写"; return 1; }
-
-    # 检查 python3
-    if ! command -v python3 >/dev/null 2>&1; then
-        warn "无 python3,装 python..."
-        pkg install -y python 2>&1 | tail -3
-    fi
 
     local hosts_tsv
     hosts_tsv=$(parse_hosts "$json") || { err "JSON 解析失败"; return 1; }
@@ -145,25 +139,18 @@ generate_ssh_config() {
     fi
     [ -f "$CONFIG_FILE" ] || touch "$CONFIG_FILE"
 
-    # 删旧 ssh-deploy 段
+    # 删旧 ssh-deploy 段(sed 区间地址:从 # ===== ssh-deploy: 到 # ===== END ssh-deploy ===== + 后面空行)
     if [ -s "$CONFIG_FILE" ]; then
-        # 用 python 安全删,避免 sed 多平台差异
-        python3 - "$CONFIG_FILE" <<'PYEOF'
-import re, sys
-p = sys.argv[1]
-with open(p, 'r', encoding='utf-8') as f:
-    content = f.read()
-content = re.sub(r'(?ms)# ===== ssh-deploy:.*?# ===== END ssh-deploy =====\r?\n?', '', content)
-with open(p, 'w', encoding='utf-8') as f:
-    f.write(content)
-PYEOF
+        sed -i '/^# ===== ssh-deploy:/,/^# ===== END ssh-deploy =====/d' "$CONFIG_FILE"
+        # 删可能残留的连续空行(段间空行)
+        sed -i '/^$/N;/^\n$/d' "$CONFIG_FILE"
     fi
 
     # 写新段
     local count=0
-    while IFS=$'\t' read -r name vps_h port user alias; do
+    while IFS=$'\t' read -r name port user alias; do
         [ -z "$name" ] && continue
-        local vps="${vps_h:-$VPS_HOST}"
+        local vps="$VPS_HOST"
         local a="${alias:-wpc-$name}"
         cat >> "$CONFIG_FILE" <<EOF
 
@@ -196,15 +183,8 @@ generate_aliases() {
 
     # 删旧 ssh-deploy alias 段
     if [ -f "$BASHRC" ]; then
-        python3 - "$BASHRC" <<'PYEOF'
-import re, sys
-p = sys.argv[1]
-with open(p, 'r', encoding='utf-8') as f:
-    content = f.read()
-content = re.sub(r'(?ms)# ===== ssh-deploy aliases =====.*?# ===== END ssh-deploy aliases =====\r?\n?', '', content)
-with open(p, 'w', encoding='utf-8') as f:
-    f.write(content)
-PYEOF
+        sed -i '/^# ===== ssh-deploy aliases/,/^# ===== END ssh-deploy aliases =====/d' "$BASHRC"
+        sed -i '/^$/N;/^\n$/d' "$BASHRC"
     fi
 
     local hosts_tsv
@@ -212,7 +192,7 @@ PYEOF
 
     {
         printf '\n# ===== ssh-deploy aliases =====\n'
-        while IFS=$'\t' read -r name vps_h port user alias; do
+        while IFS=$'\t' read -r name port user alias; do
             [ -z "$name" ] && continue
             local a="${alias:-wpc-$name}"
             printf 'ssh-%s() { ssh %s; }\n' "$name" "$a"
@@ -255,16 +235,7 @@ show_status() {
     echo "--- VPS 主机清单 ---"
     local json
     json=$(fetch_vps_hosts) && {
-        if command -v python3 >/dev/null 2>&1; then
-            python3 - "$json" <<'PYEOF'
-import json, sys
-data = json.loads(sys.argv[1])
-for s in data.get('servers', []):
-    print(f"  {s.get('name',''):<12} port {s.get('ssh_port',''):<5} user {s.get('ssh_user',''):<10} alias {s.get('alias','')}")
-PYEOF
-        else
-            echo "$json"
-        fi
+        parse_hosts "$json" | awk -F'\t' '{ printf "  %-12s port %-5s user %-10s alias %s\n", $1, $2, $3, $4 }'
     } || warn "  (无 / 拉不到)"
 }
 
