@@ -16,8 +16,8 @@
 ## 装脚本优先级
 
 1. **本仓 zip**(`<script>/bin/openssh/OpenSSH-Win64.zip`,相对脚本目录)
-   - `irm ... \| iex` 跑时从 raw.githubusercontent.com 拉脚本,脚本再拉 zip — 全程 HTTP
-   - 解压到 `%SystemRoot%\System32\OpenSSH\`(走 `schtasks /RU SYSTEM` + `cmd /c xcopy` 模板,绕 ACL)
+   - `Invoke-WebRequest` 跑时从 raw.githubusercontent.com 拉脚本,脚本再拉 zip — 全程 HTTP
+   - 解压到 `%SystemRoot%\System32\OpenSSH\`(走 `cmd /c xcopy` 模板,绕 ACL)
 2. **本机 WinSxS**(`%SystemRoot%\WinSxS\amd64_openssh-*-components-onecore_*`)
    - Win10 22H2+/Win11 自带,5 秒拷完
 3. **Windows Update CDN**(`Add-WindowsCapability`)

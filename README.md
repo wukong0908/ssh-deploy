@@ -41,32 +41,33 @@
 ### 场景 1:装第一台主机(本机 Win11)
 
 ```powershell
-irm https://raw.githubusercontent.com/wukong0908/ssh-deploy/<commit>/win/ssh-deploy.ps1 | iex
+# PS 7+ 不认 `irm | iex`,走下载 + 调两步
+$tmp = "$env:TEMP\ssh-deploy.ps1"; Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/wukong0908/ssh-deploy/<commit>/win/ssh-deploy.ps1' -OutFile $tmp -UseBasicParsing; & $tmp
 ```
 
 跑时:
-1. 选 `[1] Install`(默认双向)
+1. 选 `[2] Install 本机`(PreCheck + PreCleanup + 装)
 2. 提示输入:VPS / Bearer token / FRP token / 端口 / 本机账号 → 全有默认
 3. 装完显示:本机 sshd Running + frpc PID + 端口 6000
-4. 末了问"register 到 VPS 吗"→ y → VPS hosts.json +1 条
+4. 末了 register 到 VPS → hosts.json +1 条
 
 ### 场景 2:装第二台主机(老机器,账号 wukong)
 
 ```powershell
-irm https://raw.githubusercontent.com/wukong0908/ssh-deploy/<commit>/win/ssh-deploy.ps1 | iex
+$tmp = "$env:TEMP\ssh-deploy.ps1"; Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/wukong0908/ssh-deploy/<commit>/win/ssh-deploy.ps1' -OutFile $tmp -UseBasicParsing; & $tmp
 ```
 
 跑时:
-1. 选 `[1] Install`
+1. 选 `[2] Install 本机`
 2. **关键参数**:本机账号输 `wukong`(小写),FRP 端口输 `6001`,ServerName 输 `dev`
 3. 装完:VPS hosts.json +1(`wpc-dev` → `wukong@8.163.106.31:6001`)
-4. **任何已装客户端**重跑 `[3] Switch` → 自动多出 `wpc-dev` alias
+4. **任何已装客户端**重跑 `[1] VPS 状态` → 自动同步 `wpc-dev` alias
 
 ### 场景 3:装外机/客户端(Win 或 Termux)
 
 **Win**:
 ```powershell
-irm https://raw.githubusercontent.com/wukong0908/ssh-deploy/<commit>/win/ssh-deploy.ps1 -InstallMode client | iex
+$tmp = "$env:TEMP\ssh-deploy.ps1"; Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/wukong0908/ssh-deploy/<commit>/win/ssh-deploy.ps1' -OutFile $tmp -UseBasicParsing; & $tmp -InstallMode client
 ```
 
 **Termux**:
@@ -215,7 +216,7 @@ Host wpc-dev
 | WinSxS | ~5 秒 |
 | Windows Update | 5 ~ 30 分钟 |
 
-`irm ... | iex` 跑时,自动从 `raw.githubusercontent.com/wukong0908/ssh-deploy/main/bin/openssh/OpenSSH-Win64.zip` 拉 5MB zip.
+`Invoke-WebRequest` 跑时,自动从 `raw.githubusercontent.com/wukong0908/ssh-deploy/main/bin/openssh/OpenSSH-Win64.zip` 拉 5MB zip。
 
 ## 文件
 
@@ -238,12 +239,12 @@ Host wpc-dev
 
 **Win 双向(本机)**:
 ```powershell
-irm https://raw.githubusercontent.com/wukong0908/ssh-deploy/<commit>/win/ssh-deploy.ps1 | iex
+$tmp = "$env:TEMP\ssh-deploy.ps1"; Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/wukong0908/ssh-deploy/<commit>/win/ssh-deploy.ps1' -OutFile $tmp -UseBasicParsing; & $tmp
 ```
 
 **Win 只客户端(外机)**:
 ```powershell
-irm https://raw.githubusercontent.com/wukong0908/ssh-deploy/<commit>/win/ssh-deploy.ps1 -InstallMode client | iex
+$tmp = "$env:TEMP\ssh-deploy.ps1"; Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/wukong0908/ssh-deploy/<commit>/win/ssh-deploy.ps1' -OutFile $tmp -UseBasicParsing; & $tmp -InstallMode client
 ```
 
 **Termux 客户端**:

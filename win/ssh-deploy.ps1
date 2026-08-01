@@ -31,7 +31,8 @@
     'both'(默认)/ 'server' / 'client'
 
 .EXAMPLE
-    irm https://raw.githubusercontent.com/wukong0908/ssh-deploy/<commit>/win/ssh-deploy.ps1 | iex
+    # PS 7+ 不认 `irm | iex`,走两步:下文件 → 调
+    $tmp = "$env:TEMP\ssh-deploy.ps1"; Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/wukong0908/ssh-deploy/<commit>/win/ssh-deploy.ps1' -OutFile $tmp -UseBasicParsing; & $tmp
     # 交互式
 #>
 
