@@ -143,7 +143,26 @@ class Handler(BaseHTTPRequestHandler):
         }
         with _lock:
             data = _load()
-            data["servers"] = [s for s in data.get("servers", []) if s.get("name") != name]
+            # 端口冲突检测:同 port + 同 vps_host 已存在另一台 name → 拒(避免 frps 随机路由)
+            existing_servers = [s for s in data.get("servers", []) if s.get("name") != name]
+            conflict = next(
+                (s for s in existing_servers
+                 if s.get("ssh_port") == port
+                 and s.get("vps_host", "") == entry["vps_host"]),
+                None
+            )
+            if conflict:
+                self._send_json(
+                    409,
+                    {
+                        "error": "port conflict",
+                        "detail": f"port {port} on {entry['vps_host']} already used by '{conflict['name']}' (user={conflict.get('ssh_user')})",
+                        "conflict_with": conflict["name"],
+                        "existing_port": port,
+                    },
+                )
+                return
+            data["servers"] = existing_servers
             data["servers"].append(entry)
             _save(data)
         self._send_json(200, {"ok": True, "registered": entry})
