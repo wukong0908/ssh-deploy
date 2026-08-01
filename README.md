@@ -91,14 +91,22 @@ ssh wpc-dev    # 进老机器
 ```
 ========== ssh-deploy (DESKTOP-WK) =========
   [1] VPS 状态(云端所有主机 + 本机 sshd/frpc/port/config + 同步 alias)
-  [2] Install 本机(server + client)
+  [2] Install 本机(PreCheck + PreCleanup + 装)
   [3] 把本机登记到 VPS
-  [4] 从 VPS 注销本机
-  [5] 从 VPS 注销任意主机
-  [6] Uninstall 本机(清 sshd/frpc/schtasks/config/alias + VPS 注销)
+  [4] 注销主机(从 VPS 列表挑,本机 / 任意)
+  [5] Uninstall 本机(清 sshd/frpc/schtasks/config/alias + VPS 注销)
+  [7] PreCheck (环境体检报告,不改)
   [0] Exit
 ==========================================
 ```
+
+### Install 三段流程
+
+| 阶段 | 函数 | 行为 |
+|---|---|---|
+| A. PreCheck | `Invoke-PreCheck` | 体检报告(管理员/OS/账号/网络/环境软件/端口/痕迹/Defender). 不修改 |
+| B. PreCleanup | `Invoke-PreCleanup` | 清老路径 `C:\Tools\frp` / 老 `frpc-autostart` 任务 / `~/.ssh/config` ssh-deploy 段 / PROFILE alias 段 / 加 Defender 排除 `C:\frp`. 主人 `yes/no` 决定 |
+| C. Install | `Invoke-Install` | 按 `InstallMode` 跑 server (sshd/sshd_config/防火墙/frpc/账号检查) + client (ssh.exe/拉清单/写 config/写 alias) + 自动 register |
 
 **Status 例子**:
 ```

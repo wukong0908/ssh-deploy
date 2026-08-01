@@ -272,56 +272,60 @@ function Register-ThisHost {
 }
 
 function Unregister-ThisHost {
-    Get-RegisterParams
-    if (-not $BearerToken) {
-        Write-Host "需要 -BearerToken" -ForegroundColor Yellow
-        return
-    }
-    $payload = @{ name = $ServerName } | ConvertTo-Json -Compress
-    try {
-        $url = "http://${VpsHost}:8080/ssh-deploy/unregister"
-        $resp = Invoke-RestMethod -Uri $url -Method POST -ContentType 'application/json' -Headers (Get-VpsHeaders) -Body $payload -TimeoutSec 8 -ErrorAction Stop
-        Write-Host "✅ 已注销 $($ServerName)(移除 $($resp.removed) 条)" -ForegroundColor Green
-    } catch {
-        Write-Host "❌ unregister 失败:$($_.Exception.Message)" -ForegroundColor Red
-    }
+    # 兼容旧调用:已并入 Unregister-Host(菜单 [4])
+    Write-Host "⚠️  Unregister-ThisHost 已并入 Unregister-Host(菜单 [4])" -ForegroundColor Yellow
+    Unregister-Host
 }
 
-# ---------- 注销任意主机(从 VPS 列表挑) ----------
-function Unregister-AnyHost {
-    # 先拉 VPS 当前列表给主人看
+# ---------- 注销主机(本机 / 任意,从 VPS 列表挑) ----------
+function Unregister-Host {
+    if (-not $BearerToken -and $TokenFile) {
+        $auto = Get-TokenFromFile -FilePath $TokenFile -Key 'BEARER_TOKEN'
+        if ($auto) { $BearerToken = $auto; $script:BearerToken = $auto }
+    }
+    if (-not $BearerToken) {
+        Write-Host "❌ 无 Bearer token,不能注销" -ForegroundColor Red
+        return $false
+    }
+    # VpsHost 兜底
+    if (-not $VpsHost) { $VpsHost = $DEFAULT_VPS; $script:VpsHost = $DEFAULT_VPS }
+
     $hosts = Get-VpsHostsJson
     if (-not $hosts -or -not $hosts.servers -or $hosts.servers.Count -eq 0) {
         Write-Host "VPS 当前无主机注册" -ForegroundColor Yellow
-        return
+        return $false
     }
+
     Write-Host ""
     Write-Host "--- VPS 当前注册主机 ---" -ForegroundColor Cyan
     $hosts.servers | ForEach-Object {
-        Write-Host ("  {0,-20} port {1,-5} user {2}" -f $_.name, $_.ssh_port, $_.ssh_user)
+        $isThis = if ($_.name -eq $env:COMPUTERNAME.ToLower()) { " ← 本机" } else { "" }
+        Write-Host ("  {0,-20} port {1,-5} user {2}{3}" -f $_.name, $_.ssh_port, $_.ssh_user, $isThis) -ForegroundColor $(if ($isThis){'Green'}else{'Gray'})
     }
     Write-Host ""
     $target = Read-Host "输入要注销的主机名(name)"
     if (-not $target) {
         Write-Host "❌ 取消(空输入)" -ForegroundColor Yellow
-        return
+        return $false
     }
     if (-not ($hosts.servers | Where-Object { $_.name -eq $target })) {
         Write-Host "❌ VPS 无此主机:$target" -ForegroundColor Red
-        return
+        return $false
     }
     $confirm = Read-Host "确认注销 '$target'? (yes/no)"
     if ($confirm -ne 'yes') {
         Write-Host "❌ 取消" -ForegroundColor Yellow
-        return
+        return $false
     }
     try {
         $url = "http://${VpsHost}:8080/ssh-deploy/unregister"
         $payload = @{ name = $target } | ConvertTo-Json -Compress
         $resp = Invoke-RestMethod -Uri $url -Method POST -ContentType 'application/json' -Headers (Get-VpsHeaders) -Body $payload -TimeoutSec 8 -ErrorAction Stop
         Write-Host "✅ 已注销 '$target'(移除 $($resp.removed) 条)" -ForegroundColor Green
+        return $true
     } catch {
         Write-Host "❌ unregister 失败:$($_.Exception.Message)" -ForegroundColor Red
+        return $false
     }
 }
 
@@ -959,9 +963,182 @@ function Show-Status {
     Write-Host "✅ 同步完成。PowerShell 重启后 alias 生效。" -ForegroundColor Green
 }
 
-# ---------- 主流程:Install ----------
+# ---------- PreCheck: 环境体检报告(不改) ----------
+function Invoke-PreCheck {
+    Write-Host ""
+    Write-Host "========== PreCheck ==========" -ForegroundColor Cyan
+
+    # 主人 / 权限
+    $isAdmin = [bool]([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    Write-Host "管理员: $(if ($isAdmin) { '✅' } else { '❌' })"
+
+    try {
+        $os = Get-CimInstance Win32_OperatingSystem
+        Write-Host "OS:     $($os.Caption) Build $($os.BuildNumber)"
+    } catch {}
+
+    # 账号
+    $u = $null
+    if (-not $LocalUser) { $LocalUser = $DEFAULT_USER }
+    try {
+        $u = Get-LocalUser -Name $LocalUser -ErrorAction Stop
+        Write-Host "账号:   $LocalUser $(if ($u.PasswordRequired) {'✅ 已设密码'} else {'⚠️  未设密码'})"
+    } catch {
+        Write-Host "账号:   $LocalUser ❌ 不存在"
+    }
+
+    # 网络(3 项各 ~3s, 同步跑)
+    Write-Host ""
+    Write-Host "网络:" -ForegroundColor DarkGray
+    $ghOk    = (Test-NetConnection 'raw.githubusercontent.com' -Port 443 -InformationLevel Quiet -WarningAction SilentlyContinue) -eq $true
+    $apiOk   = (Test-NetConnection $VpsHost -Port 8080 -InformationLevel Quiet -WarningAction SilentlyContinue) -eq $true
+    $frpsOk  = (Test-NetConnection $VpsHost -Port 7000 -InformationLevel Quiet -WarningAction SilentlyContinue) -eq $true
+    Write-Host "  GitHub raw (:443)    : $(if ($ghOk){'✅ 通'}else{'❌ 不通'})"
+    Write-Host "  VPS ssh-deploy-api   : $(if ($apiOk){'✅ :8080 通'}else{'❌ :8080 不通'})"
+    Write-Host "  VPS frps             : $(if ($frpsOk){'✅ :7000 通'}else{'❌ :7000 不通'})"
+
+    # 环境软件
+    Write-Host ""
+    Write-Host "环境软件:" -ForegroundColor DarkGray
+    $sshdExe  = "$env:SystemRoot\System32\OpenSSH\sshd.exe"
+    $sshExe   = "$env:SystemRoot\System32\OpenSSH\ssh.exe"
+    $frpcExe  = Join-Path $FrpcInstallDir 'frpc.exe'
+    $tomlOk   = Test-Path (Join-Path $FrpcInstallDir 'frpc.toml')
+    Write-Host "  sshd:        $(if (Test-Path $sshdExe){'✅ 已装'}else{'❌ 未装'})"
+    Write-Host "  ssh.exe:     $(if (Test-Path $sshExe){'✅ 已装'}else{'❌ 未装'})"
+    Write-Host "  frpc.exe:    $(if (Test-Path $frpcExe){'✅ '+ $frpcExe}else{'❌ 未装'})"
+    Write-Host "  frpc.toml:   $(if ($tomlOk){'✅ 已配置'}else{'❌ 未写'})"
+    $frpcBgTask = Get-ScheduledTask frpc-bg -ErrorAction SilentlyContinue
+    Write-Host "  frpc-bg:     $(if ($frpcBgTask){"✅ $($frpcBgTask.State)"}else{'❌ 未注册'})"
+    $frpcProc = (tasklist /FI "IMAGENAME eq frpc.exe" /NH 2>$null) | Where-Object { $_ -match 'frpc\.exe' } | Select-Object -First 1
+    Write-Host "  frpc 进程:   $(if ($frpcProc -and $frpcProc -match 'frpc\.exe\s+(\d+)'){"✅ PID $($Matches[1])"}else{'❌ 未跑'})"
+
+    # 端口 / 防火墙
+    Write-Host ""
+    Write-Host "端口 / 防火墙:" -ForegroundColor DarkGray
+    $conn22 = Get-NetTCPConnection -LocalPort 22 -State Listen -ErrorAction SilentlyContinue
+    Write-Host "  :22 LISTEN:         $(if ($conn22){'✅'}else{'❌ 未监听'})"
+    $fwRule = Get-NetFirewallRule -DisplayName 'OpenSSH-Server-In-TCP' -ErrorAction SilentlyContinue
+    Write-Host "  防火墙 :22 放行:    $(if ($fwRule){'✅'}else{'❌ 未加'})"
+
+    # ssh-deploy 痕迹(要清的)
+    Write-Host ""
+    Write-Host "ssh-deploy 痕迹:" -ForegroundColor DarkGray
+    $oldFrpDir = 'C:\Tools\frp'
+    Write-Host "  C:\Tools\frp (老):  $(if (Test-Path $oldFrpDir){'⚠️  存在,要清'}else{'✅ 无'})"
+    $cfgContent = if (Test-Path $cfg) { Get-Content $cfg -Raw -ErrorAction SilentlyContinue } else { '' }
+    Write-Host "  ~/.ssh/config 段:   $(if ($cfgContent -match '# ===== ssh-deploy:'){'⚠️  存在,要清'}else{'✅ 无'})"
+    $profContent = if (Test-Path $PROFILE) { Get-Content $PROFILE -Raw -ErrorAction SilentlyContinue } else { '' }
+    Write-Host "  PROFILE alias 段:   $(if ($profContent -match '# ===== ssh-deploy aliases'){'⚠️  存在,要清'}else{'✅ 无'})"
+    $oldAutostart = Get-ScheduledTask frpc-autostart -ErrorAction SilentlyContinue
+    Write-Host "  frpc-autostart(老): $(if ($oldAutostart){'⚠️  存在,要清'}else{'✅ 无'})"
+
+    # Defender
+    Write-Host ""
+    Write-Host "Defender:" -ForegroundColor DarkGray
+    try {
+        $def = Get-MpPreference -ErrorAction Stop
+        Write-Host "  \$env:TEMP 排除:    $(if ($def.ExclusionPath -contains $env:TEMP){'✅ 已加'}else{'❌ 未加'})"
+        Write-Host "  $FrpcInstallDir 排除: $(if ($def.ExclusionPath -contains $FrpcInstallDir){'✅ 已加'}else{'⚠️  未加'})"
+    } catch {
+        Write-Host "  (Defender 未启用 / 权限不足)"
+    }
+
+    Write-Host "==============================" -ForegroundColor Cyan
+}
+
+# ---------- PreCleanup: 清残留(不动环境软件) ----------
+function Invoke-PreCleanup {
+    Write-Host ""
+    Write-Host "========== PreCleanup ==========" -ForegroundColor Cyan
+    Write-Host "清:ssh-deploy 老路径 + 老 frpc-autostart + ssh-deploy 段 + Defender 加 C:\frp"
+    Write-Host ""
+    $confirm = Read-Host "确认清? (yes/no)"
+    if ($confirm -ne 'yes') {
+        Write-Host "❌ 取消 PreCleanup" -ForegroundColor Yellow
+        return
+    }
+
+    # 1) 老 frp 路径
+    if (Test-Path 'C:\Tools\frp') {
+        Write-Host "  [1/5] 删 C:\Tools\frp ..." -ForegroundColor DarkGray
+        try {
+            Remove-Item 'C:\Tools\frp' -Recurse -Force -ErrorAction Stop
+            Write-Host "    ✅ 已删"
+        } catch {
+            Write-Host "    ⚠️  失败:$($_.Exception.Message)" -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "  [1/5] 删 C:\Tools\frp ...(不存在,跳过)"
+    }
+
+    # 2) 老 frpc-autostart 任务(老版本曾用此名)
+    $oldTask = Get-ScheduledTask frpc-autostart -ErrorAction SilentlyContinue
+    if ($oldTask) {
+        Write-Host "  [2/5] 删 frpc-autostart 计划任务 ..." -ForegroundColor DarkGray
+        try {
+            Unregister-ScheduledTask -TaskName frpc-autostart -Confirm:$false -ErrorAction Stop
+            Write-Host "    ✅ 已删"
+        } catch {
+            Write-Host "    ⚠️  失败:$($_.Exception.Message)" -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "  [2/5] 删 frpc-autostart ...(不存在,跳过)"
+    }
+
+    # 3) ~/.ssh/config ssh-deploy 段
+    if ((Test-Path $cfg) -and ((Get-Content $cfg -Raw -ErrorAction SilentlyContinue) -match '# ===== ssh-deploy:')) {
+        Write-Host "  [3/5] 删 ~/.ssh/config ssh-deploy 段 ..." -ForegroundColor DarkGray
+        try {
+            $c = Get-Content $cfg -Raw -ErrorAction Stop
+            $c = [regex]::Replace($c, '(?ms)# ===== ssh-deploy:.*?# ===== END ssh-deploy =====\r?\n?', '')
+            [System.IO.File]::WriteAllText($cfg, $c, (New-Object System.Text.UTF8Encoding $false))
+            Write-Host "    ✅ 已删"
+        } catch {
+            Write-Host "    ⚠️  失败:$($_.Exception.Message)" -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "  [3/5] 删 ~/.ssh/config 段 ...(无,跳过)"
+    }
+
+    # 4) PROFILE alias 段
+    if ((Test-Path $PROFILE) -and ((Get-Content $PROFILE -Raw -ErrorAction SilentlyContinue) -match '# ===== ssh-deploy aliases')) {
+        Write-Host "  [4/5] 删 PROFILE ssh-deploy alias 段 ..." -ForegroundColor DarkGray
+        try {
+            $p = Get-Content $PROFILE -Raw -ErrorAction Stop
+            $p = [regex]::Replace($p, '(?ms)# ===== ssh-deploy aliases =====.*?# ===== END ssh-deploy aliases =====\r?\n?', '')
+            [System.IO.File]::WriteAllText($PROFILE, $p, (New-Object System.Text.UTF8Encoding $false))
+            Write-Host "    ✅ 已删"
+        } catch {
+            Write-Host "    ⚠️  失败:$($_.Exception.Message)" -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "  [4/5] 删 PROFILE alias 段 ...(无,跳过)"
+    }
+
+    # 5) Defender 排除加 C:\frp
+    Write-Host "  [5/5] Defender 排除加 $FrpcInstallDir ..." -ForegroundColor DarkGray
+    try {
+        Add-MpPreference -ExclusionPath $FrpcInstallDir -ErrorAction Stop
+        Write-Host "    ✅ 已加"
+    } catch {
+        Write-Host "    (Defender 未启用 / 已存在 / 权限不足)"
+    }
+
+    Write-Host "==============================" -ForegroundColor Cyan
+}
+
+# ---------- 主流程:Install (PreCheck + PreCleanup + 装) ----------
 function Invoke-Install {
     Get-InstallParams
+
+    # 阶段 A:PreCheck(报告,不改)
+    Invoke-PreCheck
+
+    # 阶段 B:PreCleanup(主人决定 yes/no)
+    Invoke-PreCleanup
+
+    # 阶段 C:装(server + client 融合,按 mode 切)
     Write-Host ""
     Write-Host "====== Install (mode=$InstallMode) ======" -ForegroundColor Cyan
     if ($InstallMode -in 'both','server') {
@@ -1155,22 +1332,21 @@ function Show-Menu {
         Write-Host ""
         Write-Host "========== ssh-deploy ($env:COMPUTERNAME) =========" -ForegroundColor Cyan
         Write-Host "  [1] VPS 状态(云端所有主机 + 本机 sshd/frpc/port/config + 同步 alias)"
-        Write-Host "  [2] Install 本机(server + client)"
+        Write-Host "  [2] Install 本机(PreCheck + PreCleanup + 装)"
         Write-Host "  [3] 把本机登记到 VPS"
-        Write-Host "  [4] 从 VPS 注销本机"
-        Write-Host "  [5] 从 VPS 注销任意主机"
-        Write-Host "  [6] Uninstall 本机(清 sshd/frpc/schtasks/config/alias + VPS 注销)"
+        Write-Host "  [4] 注销主机(从 VPS 列表挑,本机 / 任意)"
+        Write-Host "  [5] Uninstall 本机(清 sshd/frpc/schtasks/config/alias + VPS 注销)"
+        Write-Host "  [7] PreCheck (环境体检报告,不改)"
         Write-Host "  [0] Exit"
         Write-Host "===========================================" -ForegroundColor Cyan
-        $choice = Read-Host "选择 [0-6]"
-        # Status 路径也走 Get-VpsHostsJson,内部自动从 token 文件补 Bearer,VpsHost 兜底在 Get-*Params 内
+        $choice = Read-Host "选择 [0-7]"
         switch ($choice) {
             '1' { Show-Status }
             '2' { Invoke-Install }
             '3' { [void](Register-ThisHost) }
-            '4' { Unregister-ThisHost }
-            '5' { Unregister-AnyHost }
-            '6' { Invoke-Uninstall }
+            '4' { [void](Unregister-Host) }
+            '5' { Invoke-Uninstall }
+            '7' { Invoke-PreCheck }
             '0' { return }
             default { Write-Host "无效输入" -ForegroundColor Yellow }
         }
