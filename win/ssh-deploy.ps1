@@ -1327,6 +1327,335 @@ function Invoke-Uninstall {
     Write-Host "注意:本脚本本身未删,主人手动决定是否保留。" -ForegroundColor DarkGray
 }
 
+
+# ---------- Syncthing 协同层 ----------
+$script:SyncthingConfigDir = Join-Path $env:LOCALAPPDATA 'Syncthing'
+$script:SyncthingExe = Join-Path $script:SyncthingConfigDir 'syncthing.exe'
+$script:SyncthingConfig = Join-Path $script:SyncthingConfigDir 'config.xml'
+$script:SyncthingPoller = Join-Path $PSScriptRoot 'ssh-deploy-poller.ps1'
+$script:SyncthingTaskName = 'ssh-deploy-poller'
+$script:SyncthingDefaultVps = '8.163.106.31'
+
+function Get-SyncthingInstallStatus {
+    return [pscustomobject]@{
+        Exe       = Test-Path $script:SyncthingExe
+        Config    = Test-Path $script:SyncthingConfig
+        Running   = ($null -ne (Get-Process syncthing -ErrorAction SilentlyContinue))
+        Task      = ($null -ne (Get-ScheduledTask -TaskName $script:SyncthingTaskName -ErrorAction SilentlyContinue))
+        AutoStart = (Test-Path (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup\Syncthing.lnk'))
+    }
+}
+
+function Get-BearerTokenLocal {
+    $p = Join-Path $env:USERPROFILE '.ssh\deploy-secrets.md'
+    if (-not (Test-Path $p)) { return $null }
+    foreach ($line in Get-Content $p) {
+        $t = $line.Trim()
+        if ($t -match '^BEARER_TOKEN=(.+)$') {
+            return ($Matches[1].Trim() -replace '^"', '' -replace '"$', '')
+        }
+    }
+    return $null
+}
+
+function Get-DeviceIdFromSyncthing {
+    if (-not (Test-Path $script:SyncthingConfig)) { return $null }
+    try {
+        $cfg = [xml](Get-Content $script:SyncthingConfig -Raw)
+        return $cfg.syncthing.device.id
+    } catch { return $null }
+}
+
+function Install-Syncthing {
+    if (Test-Path $script:SyncthingExe) {
+        Write-Host "Syncthing 已装: $script:SyncthingExe" -ForegroundColor DarkGray
+        return $true
+    }
+    if (-not (Test-Path $script:SyncthingConfigDir)) {
+        New-Item -ItemType Directory -Path $script:SyncthingConfigDir -Force | Out-Null
+    }
+    Write-Host "装 Syncthing (winget 优先 / MSI fallback)..." -ForegroundColor Cyan
+    $ok = $false
+    try {
+        $w = Get-Command winget -ErrorAction Stop
+        Write-Host "winget 找到: $($w.Source)" -ForegroundColor DarkGray
+        & winget install --id Syncthing.Syncthing -e --accept-package-agreements --accept-source-agreements --silent 2>&1 | Out-Host
+        $src = Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Packages\Syncthing.Syncthing_Microsoft.Winget.Source_*\syncthing.exe'
+        $hit = Get-ChildItem $src -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($hit) {
+            Copy-Item $hit.FullName $script:SyncthingExe -Force
+            $ok = $true
+        }
+    } catch {
+        Write-Host "winget 不可用: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+    if (-not $ok) {
+        Write-Host "走 MSI fallback: 从 GitHub releases 下" -ForegroundColor Cyan
+        $url = 'https://github.com/syncthing/syncthing/releases/latest/download/syncthing-windows-amd64-v1.27.0.zip'
+        $zip = Join-Path $env:TEMP 'syncthing.zip'
+        try {
+            Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing -ErrorAction Stop
+            Expand-Archive -Path $zip -DestinationPath $script:SyncthingConfigDir -Force
+            $exe = Get-ChildItem (Join-Path $script:SyncthingConfigDir 'syncthing-windows-*') -Filter syncthing.exe -Recurse | Select-Object -First 1
+            if ($exe) {
+                Move-Item $exe.FullName $script:SyncthingExe -Force
+                $ok = $true
+            }
+        } catch {
+            Write-Host "MSI fallback 失败: $($_.Exception.Message)" -ForegroundColor Red
+            return $false
+        }
+    }
+    if ($ok) {
+        Write-Host "Syncthing 装好: $script:SyncthingExe" -ForegroundColor Green
+        if (-not (Test-Path $script:SyncthingConfig)) {
+            Write-Host "首次跑生成 device id..." -ForegroundColor Cyan
+            $p = Start-Process $script:SyncthingExe -NoNewWindow -PassThru
+            Start-Sleep -Seconds 8
+            Get-Process syncthing -ErrorAction SilentlyContinue | Stop-Process -Force
+            if (Test-Path $script:SyncthingConfig) {
+                Write-Host "config.xml 已生成" -ForegroundColor Green
+            } else {
+                Write-Host "config.xml 未生成" -ForegroundColor Yellow
+            }
+        }
+    }
+    return $ok
+}
+
+function Register-DeviceToVPS {
+    $token = Get-BearerTokenLocal
+    if (-not $token) {
+        Write-Host "没 BEARER_TOKEN, 先菜单 [3] 注册本机到 VPS" -ForegroundColor Red
+        return $false
+    }
+    $devId = Get-DeviceIdFromSyncthing
+    if (-not $devId) {
+        Write-Host "Syncthing 未装 / config.xml 无 device id" -ForegroundColor Red
+        return $false
+    }
+    $deviceName = Read-Host "设备名 (英文短名, 如 wk-main / old-rig / lap-room)"
+    if (-not $deviceName) { return $false }
+    $frpcInfo = $null
+    try {
+        foreach ($line in Get-Content (Join-Path $env:USERPROFILE '.ssh\frpc.ini') -ErrorAction Stop) {
+            if ($line -match '^remote_port\s*=\s*(\d+)') { $frpcInfo = @{ remote_port = [int]$Matches[1] } }
+        }
+    } catch {}
+    if (-not $frpcInfo) {
+        Write-Host "没找到 frpc remote_port" -ForegroundColor Yellow
+    }
+    $body = @{
+        device_id    = $devId
+        device_name  = $deviceName
+        capabilities = @{
+            sshd      = @{ user = $env:USERNAME }
+            frpc      = $frpcInfo
+            syncthing = @{ folders = @() }
+        }
+    } | ConvertTo-Json -Compress
+    try {
+        $r = Invoke-RestMethod -Uri "http://$($script:SyncthingDefaultVps):8080/device/register" `
+            -Method POST -ContentType 'application/json' `
+            -Headers @{ Authorization = "Bearer $token" } `
+            -Body $body -TimeoutSec 8 -ErrorAction Stop
+        Write-Host "已注册: $($r.device_name)" -ForegroundColor Green
+        return $true
+    } catch {
+        Write-Host "注册失败: $($_.Exception.Message)" -ForegroundColor Red
+        return $false
+    }
+}
+
+function Start-LongPollerTask {
+    if (-not (Test-Path $script:SyncthingPoller)) {
+        Write-Host "找不到 poller: $script:SyncthingPoller" -ForegroundColor Red
+        return $false
+    }
+    $token = Get-BearerTokenLocal
+    if (-not $token) {
+        Write-Host "没 BEARER_TOKEN" -ForegroundColor Red
+        return $false
+    }
+    Get-ScheduledTask -TaskName $script:SyncthingTaskName -ErrorAction SilentlyContinue | Unregister-ScheduledTask -Confirm:$false
+    $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -Window Hidden -File `"$($script:SyncthingPoller)`""
+    $trigger = New-ScheduledTaskTrigger -AtLogOn
+    $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+    Register-ScheduledTask -TaskName $script:SyncthingTaskName `
+        -Action $action -Trigger $trigger -Principal $principal -Settings $settings `
+        -Description "ssh-deploy long-poller (Syncthing 协同 / ssh-config 同步)" | Out-Null
+    Write-Host "已注册计划任务: $script:SyncthingTaskName" -ForegroundColor Green
+    Start-ScheduledTask -TaskName $script:SyncthingTaskName
+    Write-Host "已立即启动" -ForegroundColor Green
+    return $true
+}
+
+function Add-SyncthingAutoStart {
+    $shortcut = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup\Syncthing.lnk'
+    if (Test-Path $shortcut) {
+        Write-Host "Syncthing 开机自启已存在" -ForegroundColor DarkGray
+        return
+    }
+    $ws = New-Object -ComObject WScript.Shell
+    $s = $ws.CreateShortcut($shortcut)
+    $s.TargetPath = $script:SyncthingExe
+    $s.WorkingDirectory = $script:SyncthingConfigDir
+    $s.WindowStyle = 7
+    $s.Save()
+    Write-Host "Syncthing 开机自启已加" -ForegroundColor Green
+}
+
+function Invoke-SyncthingMenu {
+    while ($true) {
+        Write-Host ""
+        Write-Host "========== Syncthing 协同 =========" -ForegroundColor Cyan
+        $st = Get-SyncthingInstallStatus
+        $devId = Get-DeviceIdFromSyncthing
+        Write-Host "  exe:       $(if ($st.Exe) {'OK'} else {'NO'})  $script:SyncthingExe"
+        Write-Host "  config:    $(if ($st.Config) {'OK'} else {'NO'})  $script:SyncthingConfig"
+        if ($devId) { Write-Host "  device id: $($devId)" } else { Write-Host "  device id: (未生成)" -ForegroundColor DarkGray }
+        Write-Host "  running:   $(if ($st.Running) {'OK'} else {'NO'})"
+        Write-Host "  长轮询任务: $(if ($st.Task) {'OK'} else {'NO'})"
+        Write-Host "  开机自启:   $(if ($st.AutoStart) {'OK'} else {'NO'})"
+        Write-Host ""
+        Write-Host "  [1] 装 Syncthing"
+        Write-Host "  [2] 把本机登记到 VPS"
+        Write-Host "  [3] 启动后台 long-poller (计划任务)"
+        Write-Host "  [4] 加 Syncthing 开机自启"
+        Write-Host "  [5] 看 VPS 设备目录 + 共享"
+        Write-Host "  [6] 创建共享文件夹"
+        Write-Host "  [7] 加入共享文件夹"
+        Write-Host "  [8] 退出共享"
+        Write-Host "  [0] 返回主菜单"
+        Write-Host "===================================" -ForegroundColor Cyan
+        $c = Read-Host "选择 [0-8]"
+        switch ($c) {
+            '1' { [void](Install-Syncthing) }
+            '2' { [void](Register-DeviceToVPS) }
+            '3' { [void](Start-LongPollerTask) }
+            '4' { Add-SyncthingAutoStart }
+            '5' { Show-DeviceDirectory }
+            '6' { Create-SharedFolder }
+            '7' { Join-SharedFolder }
+            '8' { Leave-SharedFolder }
+            '0' { return }
+            default { Write-Host "无效输入" -ForegroundColor Yellow }
+        }
+    }
+}
+
+function Show-DeviceDirectory {
+    $token = Get-BearerTokenLocal
+    if (-not $token) { Write-Host "没 BEARER_TOKEN" -ForegroundColor Red; return }
+    try {
+        $r = Invoke-RestMethod -Uri "http://$($script:SyncthingDefaultVps):8080/device/list" `
+            -Headers @{ Authorization = "Bearer $token" } -TimeoutSec 8 -ErrorAction Stop
+        Write-Host ""
+        Write-Host "===== VPS 设备目录 =====" -ForegroundColor Cyan
+        foreach ($d in $r.devices) {
+            $frpc = if ($d.capabilities.frpc) { $d.capabilities.frpc.remote_port } else { '-' }
+            $onl = if ($d.online) { 'online' } else { 'offline' }
+            $idShort = $d.device_id.Substring(0, [Math]::Min(14, $d.device_id.Length))
+            Write-Host ("  {0,-20} {1,-15} {2}  frpc:{3}" -f $d.device_name, $idShort, $onl, $frpc)
+        }
+        $r2 = Invoke-RestMethod -Uri "http://$($script:SyncthingDefaultVps):8080/shared/list" `
+            -Headers @{ Authorization = "Bearer $token" } -TimeoutSec 8 -ErrorAction Stop
+        Write-Host ""
+        Write-Host "===== 共享文件夹 =====" -ForegroundColor Cyan
+        foreach ($s in $r2.folders) {
+            $mems = ($s.members | ForEach-Object { $_.device_id.Substring(0, 7) }) -join ', '
+            Write-Host "  $($s.folder_id) - $($s.name) [members: $mems]"
+        }
+    } catch {
+        Write-Host "拉取失败: $($_.Exception.Message)" -ForegroundColor Red
+    }
+}
+
+function Create-SharedFolder {
+    $token = Get-BearerTokenLocal
+    if (-not $token) { Write-Host "没 BEARER_TOKEN" -ForegroundColor Red; return }
+    $folderId = Read-Host "folder_id (英文短名)"
+    $name = Read-Host "显示名 (回车用 folder_id)"
+    if (-not $name) { $name = $folderId }
+    $devId = Get-DeviceIdFromSyncthing
+    $path = Read-Host "本机文件夹路径"
+    if (-not $path) { return }
+    try {
+        $r = Invoke-RestMethod -Uri "http://$($script:SyncthingDefaultVps):8080/shared/create" `
+            -Method POST -ContentType 'application/json' `
+            -Headers @{ Authorization = "Bearer $token" } `
+            -Body (@{ folder_id = $folderId; name = $name } | ConvertTo-Json -Compress) `
+            -TimeoutSec 8 -ErrorAction Stop
+        Write-Host "共享已创建: $($r.folder_id)" -ForegroundColor Green
+        $r2 = Invoke-RestMethod -Uri "http://$($script:SyncthingDefaultVps):8080/shared/join" `
+            -Method POST -ContentType 'application/json' `
+            -Headers @{ Authorization = "Bearer $token" } `
+            -Body (@{ device_id = $devId; folder_id = $folderId; folder_path = $path } | ConvertTo-Json -Compress) `
+            -TimeoutSec 8 -ErrorAction Stop
+        Write-Host "本机已加入, members: $($r2.members.Count)" -ForegroundColor Green
+    } catch {
+        Write-Host "失败: $($_.Exception.Message)" -ForegroundColor Red
+    }
+}
+
+function Join-SharedFolder {
+    $token = Get-BearerTokenLocal
+    if (-not $token) { Write-Host "没 BEARER_TOKEN" -ForegroundColor Red; return }
+    try {
+        $r = Invoke-RestMethod -Uri "http://$($script:SyncthingDefaultVps):8080/shared/list" `
+            -Headers @{ Authorization = "Bearer $token" } -TimeoutSec 8 -ErrorAction Stop
+        Write-Host ""
+        for ($i = 0; $i -lt $r.folders.Count; $i++) {
+            $s = $r.folders[$i]
+            Write-Host "  [$($i+1)] $($s.folder_id) - $($s.name) (members: $($s.members.Count))"
+        }
+        if ($r.folders.Count -eq 0) { Write-Host "(无共享)"; return }
+        $idx = (Read-Host "选 [1-$($r.folders.Count)]") -as [int]
+        if ($idx -lt 1 -or $idx -gt $r.folders.Count) { return }
+        $target = $r.folders[$idx - 1]
+        $path = Read-Host "本机文件夹路径"
+        if (-not $path) { return }
+        $devId = Get-DeviceIdFromSyncthing
+        $r2 = Invoke-RestMethod -Uri "http://$($script:SyncthingDefaultVps):8080/shared/join" `
+            -Method POST -ContentType 'application/json' `
+            -Headers @{ Authorization = "Bearer $token" } `
+            -Body (@{ device_id = $devId; folder_id = $target.folder_id; folder_path = $path } | ConvertTo-Json -Compress) `
+            -TimeoutSec 8 -ErrorAction Stop
+        Write-Host "已加入 $($target.folder_id)" -ForegroundColor Green
+    } catch {
+        Write-Host "失败: $($_.Exception.Message)" -ForegroundColor Red
+    }
+}
+
+function Leave-SharedFolder {
+    $token = Get-BearerTokenLocal
+    if (-not $token) { Write-Host "没 BEARER_TOKEN" -ForegroundColor Red; return }
+    try {
+        $r = Invoke-RestMethod -Uri "http://$($script:SyncthingDefaultVps):8080/shared/list" `
+            -Headers @{ Authorization = "Bearer $token" } -TimeoutSec 8 -ErrorAction Stop
+        Write-Host ""
+        $devId = Get-DeviceIdFromSyncthing
+        for ($i = 0; $i -lt $r.folders.Count; $i++) {
+            $s = $r.folders[$i]
+            $onit = $s.members | Where-Object { $_.device_id -eq $devId }
+            $marker = if ($onit) { '(本机在内)' } else { '' }
+            Write-Host "  [$($i+1)] $($s.folder_id) $marker"
+        }
+        if ($r.folders.Count -eq 0) { Write-Host "(无共享)"; return }
+        $idx = (Read-Host "选 [1-$($r.folders.Count)]") -as [int]
+        if ($idx -lt 1 -or $idx -gt $r.folders.Count) { return }
+        $target = $r.folders[$idx - 1]
+        $r2 = Invoke-RestMethod -Uri "http://$($script:SyncthingDefaultVps):8080/shared/leave" `
+            -Method POST -ContentType 'application/json' `
+            -Headers @{ Authorization = "Bearer $token" } `
+            -Body (@{ device_id = $devId; folder_id = $target.folder_id } | ConvertTo-Json -Compress) `
+            -TimeoutSec 8 -ErrorAction Stop
+        Write-Host "已退出 $($target.folder_id)" -ForegroundColor Green
+    } catch {
+        Write-Host "失败: $($_.Exception.Message)" -ForegroundColor Red
+    }
+}
 # ---------- 主菜单 ----------
 function Show-Menu {
     while ($true) {
@@ -1338,9 +1667,10 @@ function Show-Menu {
         Write-Host "  [4] 注销主机(从 VPS 列表挑,本机 / 任意)"
         Write-Host "  [5] Uninstall 本机(清 sshd/frpc/schtasks/config/alias + VPS 注销)"
         Write-Host "  [7] PreCheck (环境体检报告,不改)"
+        Write-Host "  [8] Syncthing 协同(装 + 接共享 + 后台 long-poller)"
         Write-Host "  [0] Exit"
         Write-Host "===========================================" -ForegroundColor Cyan
-        $choice = Read-Host "选择 [0-7]"
+        $choice = Read-Host "选择 [0-8]"
         switch ($choice) {
             '1' { Show-Status }
             '2' { Invoke-Install }
@@ -1348,6 +1678,7 @@ function Show-Menu {
             '4' { [void](Unregister-Host) }
             '5' { Invoke-Uninstall }
             '7' { Invoke-PreCheck }
+            '8' { Invoke-SyncthingMenu }
             '0' { return }
             default { Write-Host "无效输入" -ForegroundColor Yellow }
         }
