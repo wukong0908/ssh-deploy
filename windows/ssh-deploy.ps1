@@ -130,8 +130,9 @@ function Write-Err {
 function Tern {
     <#
     三元 (PS 5.1 没内建). 用: Tern \$cond 'trueStr' 'falseStr'
+    \$C 接受任意值 (\$null / 对象 / bool / 数字). if 自动转 bool.
     #>
-    param([bool]$C, [string]$T, [string]$F)
+    param($C, [string]$T, [string]$F)
     if ($C) { return $T } else { return $F }
 }
 
@@ -329,12 +330,18 @@ function Invoke-VpsApi {
         [Parameter(Mandatory)][ValidateSet('GET', 'POST', 'DELETE')][string]$Method,
         [Parameter(Mandatory)][string]$Path,
         [hashtable]$Body,
-        [switch]$LongPoll
+        [switch]$LongPoll,
+        [string]$DeviceToken
     )
 
     $timeout = if ($LongPoll) { $script:HttpTimeoutLongPoll } else { $script:HttpTimeout }
     $url = Get-ApiBase $Path
+    # 默认 Bearer (admin). DeviceToken 传了就走 X-Device-Token (用于 deregister).
     $headers = @{ Authorization = "Bearer $($script:State.BearerToken)" }
+    if ($DeviceToken) {
+        $headers['X-Device-Token'] = $DeviceToken
+        $headers.Remove('Authorization')
+    }
 
     $attempt = 0
     while ($attempt -lt $script:HttpMaxRetries) {
@@ -488,6 +495,7 @@ function Test-NetworkEgress {
     <#
     测到 VPS :8081 可达 (TCP connect, 5s timeout).
     不用 Test-NetConnection -TimeoutSec (PS 5.1 cmdlet 早期版本无此参数).
+    返 [bool]. 顺手打 status message.
     #>
     $isOpen = $false
     try {
@@ -507,8 +515,10 @@ function Test-NetworkEgress {
         Write-Host "端口 8081 开放，服务正常。"
     }
     else {
-        Write-Warning "端口 8081 不可达，请检查防火墙或服务状态。"
+        Write-Host "端口 8081 不可达，请检查防火墙或服务状态。"
     }
+
+    return $isOpen
 }
 
 #endregion
@@ -877,6 +887,12 @@ function Set-SshdConfig {
     $content = $content -replace '(?m)^#?PasswordAuthentication\s+.*$', 'PasswordAuthentication yes'
     $content = $content -replace '(?m)^#?PubkeyAuthentication\s+.*$', 'PubkeyAuthentication yes'
     $content = $content -replace '(?m)^#?PermitRootLogin\s+.*$', 'PermitRootLogin no'
+
+    # 写文件前先清只读 + grant write (ProgramData\ssh 默认 ACL 可能阻 admin 写)
+    try { Set-ItemProperty -Path $src -Name IsReadOnly -Value $false -ErrorAction Stop } catch {}
+    $me = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    try { icacls $src /grant:r "${me}:(M)" 2>&1 | Out-Null } catch {}
+
     [System.IO.File]::WriteAllText($src, $content, [System.Text.UTF8Encoding]::new($false))
     Write-Info "  sshd_config 已更新 (Password/Pubkey yes, PermitRootLogin no)"
     return @{ ok = $true }
@@ -1261,10 +1277,10 @@ function Unregister-Host {
     }
 
     $body = @{
-        device_id  = $target.device_id
-        auth_token = $authToken
+        device_id = $target.device_id
     }
-    $resp = Invoke-VpsApi -Method POST -Path '/device/deregister' -Body $body
+    # VPS 要求 deregister 走 X-Device-Token header (auth_token), 不能用 Bearer
+    $resp = Invoke-VpsApi -Method POST -Path '/device/deregister' -Body $body -DeviceToken $authToken
     if ($resp) {
         Write-Ok "  已注销 $($target.device_name)"
         return @{ ok = $true }
@@ -1305,11 +1321,8 @@ function Invoke-Uninstall {
             Write-Warn "  本机 device_id 没在 VPS 列表里 / 没 auth_token — 跳过 VPS 注销"
         }
         else {
-            $body = @{
-                device_id  = $deviceId
-                auth_token = $authToken
-            }
-            $null = Invoke-VpsApi -Method POST -Path '/device/deregister' -Body $body
+            $body = @{ device_id = $deviceId }
+            $null = Invoke-VpsApi -Method POST -Path '/device/deregister' -Body $body -DeviceToken $authToken
         }
     }
 
