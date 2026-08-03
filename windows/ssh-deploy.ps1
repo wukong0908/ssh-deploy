@@ -646,7 +646,7 @@ function Invoke-PreCheck {
     $conn22 = Get-NetTCPConnection -LocalPort 22 -State Listen -ErrorAction SilentlyContinue
     Write-Host ("    :22 LISTEN:        $(Tern $conn22 '✅' '❌ 未监听')")
     $fw = Get-NetFirewallRule -DisplayName 'OpenSSH-Server-In-TCP' -ErrorAction SilentlyContinue
-    Write-Host (" 防火墙 :22 放行: $(Tern ($fw -ne $null) '✅' '❌ 未加')")
+    Write-Host (" 防火墙 :22 放行: $(Tern ($null -ne $fw) '✅' '❌ 未加')")
 
     # 6. 痕迹 (ssh-deploy 关心的)
     Write-Host ""
@@ -1355,7 +1355,8 @@ function Show-Status {
     Write-Host ("    frpc:    $(Tern $h.Process ('running PID ' + $h.ProcId) 'stopped')")
     Write-Host ("    frpc-bg: $(Tern $h.Task 'Ready' '未注册')")
     $sshd = Get-Service sshd -ErrorAction SilentlyContinue
-    Write-Host (" sshd: $(Tern ($sshd -ne $null) $sshd.Status 'not installed')")
+    $sshdStatus = if ($null -ne $sshd) { $sshd.Status } else { 'not installed' }
+    Write-Host (" sshd: $sshdStatus")
     $conn22 = Get-NetTCPConnection -LocalPort 22 -State Listen -ErrorAction SilentlyContinue
     Write-Host ("    :22:     $(Tern $conn22 'LISTEN' 'no')")
 
