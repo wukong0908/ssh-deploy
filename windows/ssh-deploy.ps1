@@ -520,42 +520,57 @@ function Test-NetworkEgress {
 
 function Test-FrpcHealth {
     <#
-    4 态检测: 任务 / exe / toml / 进程
+    4 态检测: 任务 / exe / toml / 进程. 全用 if/else, 不用 Tern.
     .OUTPUTS
-        @{ Task, Exe, Toml, Process, Source, Note }
+        @{ Task, Exe, ExePath, Toml, Process, ProcId, Source, Note }
     #>
     $exePath = Join-Path $script:FrpcInstallDir 'frpc.exe'
     $tomlPath = Join-Path $script:FrpcInstallDir 'frpc.toml'
-    $task = Get-ScheduledTask 'frpc-bg' -ErrorAction SilentlyContinue
-    $exe = if ((Test-Path $exePath) -and (Get-Item $exePath).Length -gt $script:FrpcMinBytes) { $exePath } else { $null }
-    $toml = if (Test-Path $tomlPath) { $tomlPath } else { $null }
-    $proc = Get-Process -Name frpc -ErrorAction SilentlyContinue
-    $source = $null
-    $note = $null
-    if ($exe) {
-        $bundledResolved = $null
-        if (Test-Path $script:BundledFrpc) {
-            try { $bundledResolved = (Resolve-Path $script:BundledFrpc).Path } catch { $bundledResolved = $null }
+
+    # Task
+    $taskObj = Get-ScheduledTask 'frpc-bg' -ErrorAction SilentlyContinue
+    $hasTask = [bool]($null -ne $taskObj)
+
+    # Exe (size check)
+    $hasExe = $false
+    $exe = $null
+    if (Test-Path $exePath) {
+        $size = (Get-Item $exePath).Length
+        if ($size -gt $script:FrpcMinBytes) {
+            $hasExe = $true
+            $exe = $exePath
         }
-        if ($bundledResolved -and $exe -eq $bundledResolved) {
-            $source = 'bundled-but-not-copied'
-        }
-        elseif ($exe -like '*\AppData\Local\Temp\frpc.exe' -or $exe -like '*Temp\frpc.exe') {
+    }
+
+    # Toml
+    $hasToml = Test-Path $tomlPath
+    if ($hasToml) { $hasToml = $true } else { $hasToml = $false }
+
+    # Process
+    $procObj = Get-Process -Name frpc -ErrorAction SilentlyContinue
+    $hasProc = [bool]($null -ne $procObj)
+    $procId = if ($null -ne $procObj) { $procObj.Id } else { $null }
+
+    # Source
+    $source = 'none'
+    if ($hasExe) {
+        if ($exe -like '*Temp*frpc.exe') {
             $source = 'downloaded-temp'
         }
         else {
             $source = 'installed'
         }
     }
+
     return @{
-        Task    = [bool]$task
-        Exe     = [bool]$exe
+        Task    = $hasTask
+        Exe     = $hasExe
         ExePath = $exe
-        Toml    = [bool]$toml
-        Process = [bool]$proc
-        ProcId  = if ($proc) { $proc.Id } else { $null }
+        Toml    = $hasToml
+        Process = $hasProc
+        ProcId  = $procId
         Source  = $source
-        Note    = $note
+        Note    = $null
     }
 }
 
@@ -635,10 +650,26 @@ function Invoke-PreCheck {
     $sshExe = "$env:ProgramFiles\OpenSSH\ssh.exe"
     Write-Host ("    ssh.exe:     $(Tern (Test-Path $sshExe) '✅ 已装' '❌ 未装')")
     $health = Test-FrpcHealth
-    Write-Host ("    frpc.exe:    $(Tern $health.Exe ('✅ ' + $health.ExePath + ' [' + $health.Source + ']') '❌ 未装')")
-    Write-Host ("    frpc.toml:   $(Tern $health.Toml '✅ 已配置' '❌ 未写')")
-    Write-Host ("    frpc-bg:     $(Tern $health.Task '✅ Ready' '❌ 未注册')")
-    Write-Host ("    frpc 进程:   $(Tern $health.Process ('✅ PID ' + $health.ProcId) '❌ 未跑')")
+    if ($health.Exe) {
+        Write-Host ("    frpc.exe:    ✅ $($health.ExePath) [$($health.Source)]")
+    } else {
+        Write-Host "    frpc.exe:    ❌ 未装"
+    }
+    if ($health.Toml) {
+        Write-Host "    frpc.toml:   ✅ 已配置"
+    } else {
+        Write-Host "    frpc.toml:   ❌ 未写"
+    }
+    if ($health.Task) {
+        Write-Host "    frpc-bg:     ✅ Ready"
+    } else {
+        Write-Host "    frpc-bg:     ❌ 未注册"
+    }
+    if ($health.Process) {
+        Write-Host ("    frpc 进程:   ✅ PID $($health.ProcId)")
+    } else {
+        Write-Host "    frpc 进程:   ❌ 未跑"
+    }
 
     # 5. 端口 / 防火墙
     Write-Host ""
@@ -1352,8 +1383,16 @@ function Show-Status {
     Write-Host ""
     Write-Info "  本机:"
     $h = Test-FrpcHealth
-    Write-Host ("    frpc:    $(Tern $h.Process ('running PID ' + $h.ProcId) 'stopped')")
-    Write-Host ("    frpc-bg: $(Tern $h.Task 'Ready' '未注册')")
+    if ($h.Process) {
+        Write-Host ("    frpc:    running PID $($h.ProcId)")
+    } else {
+        Write-Host "    frpc:    stopped"
+    }
+    if ($h.Task) {
+        Write-Host "    frpc-bg: Ready"
+    } else {
+        Write-Host "    frpc-bg: 未注册"
+    }
     $sshd = Get-Service sshd -ErrorAction SilentlyContinue
     $sshdStatus = if ($null -ne $sshd) { $sshd.Status } else { 'not installed' }
     Write-Host (" sshd: $sshdStatus")
