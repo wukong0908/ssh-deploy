@@ -1393,24 +1393,27 @@ function Install-Syncthing {
     }
     Write-Host "装 Syncthing (winget 优先 / MSI fallback)..." -ForegroundColor Cyan
     $ok = $false
+    # 1) winget 优先
     try {
         $w = Get-Command winget -ErrorAction Stop
         Write-Host "winget 找到: $($w.Source)" -ForegroundColor DarkGray
         & winget install --id Syncthing.Syncthing -e --accept-package-agreements --accept-source-agreements --silent 2>&1 | Out-Host
-        $src = Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Packages\Syncthing.Syncthing_Microsoft.Winget.Source_*\syncthing.exe'
-        $hit = Get-ChildItem $src -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($hit) {
-            Copy-Item $hit.FullName $script:SyncthingExe -Force
+        # winget 装好后会建 winget Links/ + 加 PATH, 用 where 找真实 exe
+        $whereOut = (where.exe syncthing 2>&1 | Select-Object -First 1) -as [string]
+        if ($whereOut -and (Test-Path $whereOut)) {
+            Copy-Item $whereOut $script:SyncthingExe -Force
             $ok = $true
+            Write-Host "winget 装到: $whereOut" -ForegroundColor DarkGray
         }
     } catch {
         Write-Host "winget 不可用: $($_.Exception.Message)" -ForegroundColor Yellow
     }
+    # 2) GitHub release fallback (最新稳定版 URL, latest redirect 自动跟)
     if (-not $ok) {
-        Write-Host "走 MSI fallback: 从 GitHub releases 下" -ForegroundColor Cyan
-        $url = 'https://github.com/syncthing/syncthing/releases/latest/download/syncthing-windows-amd64-v1.27.0.zip'
+        Write-Host "走 GitHub release fallback..." -ForegroundColor Cyan
         $zip = Join-Path $env:TEMP 'syncthing.zip'
         try {
+            $url = 'https://github.com/syncthing/syncthing/releases/latest/download/syncthing-windows-amd64.zip'
             Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing -ErrorAction Stop
             Expand-Archive -Path $zip -DestinationPath $script:SyncthingConfigDir -Force
             $exe = Get-ChildItem (Join-Path $script:SyncthingConfigDir 'syncthing-windows-*') -Filter syncthing.exe -Recurse | Select-Object -First 1
@@ -1419,7 +1422,7 @@ function Install-Syncthing {
                 $ok = $true
             }
         } catch {
-            Write-Host "MSI fallback 失败: $($_.Exception.Message)" -ForegroundColor Red
+            Write-Host "GitHub fallback 失败: $($_.Exception.Message)" -ForegroundColor Red
             return $false
         }
     }
