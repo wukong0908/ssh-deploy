@@ -262,19 +262,23 @@ function Register-ThisHost {
         $frpcToml = 'C:\frp\frpc.toml'
         if (Test-Path $frpcToml) {
             foreach ($line in Get-Content $frpcToml) {
-                if ($line -match '^\s*remotePort\s*=\s*(\d+)') { $frpcPort = [int]$Matches[1]; break }
+                if ($line -match 'remotePort\s*=\s*(\d+)') { $frpcPort = [int]$Matches[1]; break }
             }
         }
     }
-    $payload = @{
+    # 构 capabilities (分两步避免 ConvertTo-Json 把嵌套字典当 @{}-of-@{} 序列化)
+    $caps = [ordered]@{
+        sshd      = [ordered]@{ user = $LocalUser }
+        syncthing = [ordered]@{ folders = @() }
+    }
+    if ($frpcPort) {
+        $caps.frpc = [ordered]@{ remote_port = [int]$frpcPort }
+    }
+    $payload = [ordered]@{
         device_id    = $deviceId
         device_name  = $ServerName
-        capabilities = @{
-            sshd      = @{ user = $LocalUser }
-            frpc      = if ($frpcPort) { @{ remote_port = $frpcPort } } else { $null }
-            syncthing = @{ folders = @() }
-        }
-    } | ConvertTo-Json -Compress -Depth 5
+        capabilities = $caps
+    } | ConvertTo-Json -Compress -Depth 10
     try {
         $url = "http://${VpsHost}:8080/device/register"
         $resp = Invoke-RestMethod -Uri $url -Method POST -ContentType 'application/json' -Headers (Get-VpsHeaders) -Body $payload -TimeoutSec 8 -ErrorAction Stop
