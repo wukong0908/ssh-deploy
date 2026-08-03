@@ -12,3 +12,7 @@ config.local
 *.tmp
 *.bak
 __pycache__/
+# ssh-deploy 重塑 2026-08-03 backups
+vps/*.bak.*
+vps/ssh-deploy-api/*.bak.*
+vps/ssh-deploy-api/service/*.bak.*
