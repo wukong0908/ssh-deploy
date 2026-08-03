@@ -521,7 +521,11 @@ function Test-FrpcHealth {
     $source = $null
     $note = $null
     if ($exe) {
-        if ($exe -eq (Resolve-Path $script:BundledFrpc).Path -and (Test-Path $script:BundledFrpc)) {
+        $bundledResolved = $null
+        if (Test-Path $script:BundledFrpc) {
+            try { $bundledResolved = (Resolve-Path $script:BundledFrpc).Path } catch { $bundledResolved = $null }
+        }
+        if ($bundledResolved -and $exe -eq $bundledResolved) {
             $source = 'bundled-but-not-copied'
         }
         elseif ($exe -like '*\AppData\Local\Temp\frpc.exe' -or $exe -like '*Temp\frpc.exe') {
