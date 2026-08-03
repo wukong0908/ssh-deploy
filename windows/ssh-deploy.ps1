@@ -68,7 +68,7 @@ $script:startTime = Get-Date
 #region Module 0 — Constants + Logging
 
 $script:VERSION = 'v3.0'
-$script:CommitShort = 'a13145f'   # 同步手动 — raw 拉的时候验
+$script:CommitShort = '99ae264'   # 同步手动 — raw 拉的时候验
 
 $script:DEFAULT_VPS = '8.163.106.31'
 $script:DEFAULT_PORT = 6000
@@ -709,7 +709,8 @@ function Invoke-PreCheck {
     Write-Host ""
     Write-Info "  端到端 SSH smoke:"
     $first = $null
-    foreach ($m in [regex]::Matches($cfgRaw, 'Host\s+(wpc-[\w-]+)')) {
+    $cfgSafe = if ($cfgRaw) { $cfgRaw } else { '' }
+    foreach ($m in [regex]::Matches($cfgSafe, 'Host\s+(wpc-[\w-]+)')) {
         $first = $m.Groups[1].Value
         break
     }
