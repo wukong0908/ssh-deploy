@@ -68,7 +68,7 @@ $script:startTime = Get-Date
 #region Module 0 — Constants + Logging
 
 $script:VERSION = 'v3.0'
-$script:CommitShort = 'f54b6cb'   # 同步手动 — raw 拉的时候验
+$script:CommitShort = '8d4f1a2'   # 同步手动 — raw 拉的时候验
 
 $script:DEFAULT_VPS = '8.163.106.31'
 $script:DEFAULT_PORT = 6000
@@ -246,6 +246,10 @@ function Initialize-TokenCache {
         Write-Ok "token 文档已复制到: $script:SecretsFile"
         Write-Info "  (ACL 限当前用户 R/W + SYSTEM R)"
         return $true
+    }
+    catch {
+        Write-Err "复制 token 文档失败: $($_.Exception.Message)" -Critical
+        return $false
     }
 
 # ── ~/.ssh ACL helper — 解锁读 / 写 (OpenSSH 装时收紧 ACL, 当前 admin 默认无 R/W) ──
