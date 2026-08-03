@@ -1,4 +1,4 @@
-# VPS 部署指南
+# VPS 部署指南 (v2 / 2026-08-03)
 
 > 一台 VPS 上同时跑 frps + ssh-deploy-api + nginx 反代.
 > 假设 VPS 是 Debian/Ubuntu 系,root 跑.
@@ -8,119 +8,153 @@
 | 项 | 值 |
 |---|---|
 | VPS 公网 IP | `8.163.106.31` |
-| VPS 上 frps | 已跑(:7000),token = `<FRPS_TOKEN>` |
+| VPS 上 frps | 已跑(:7000),token 在 `/etc/frp/frps.toml` |
 | 主主机 sshd | 在 :22,通过 frp 转 :6000(:6001 = 第二台主机) |
-| Bearer token | 主人自定(防路人). 例:`wukong_ssh_2026_secret_xxx` |
+| Bearer token | `/etc/ssh-deploy/ssh-deploy.env` 里 `BEARER_TOKEN=...` |
+| sshdeploy 用户 | 系统用户,`/usr/sbin/nologin`,数据 dir 拥有者 |
 
 ## 1. 准备 sshdeploy 用户 + 目录
 
 ```bash
 useradd -r -s /usr/sbin/nologin sshdeploy
-mkdir -p /opt/ssh-deploy /var/lib/ssh-deploy /etc/ssh-deploy
+mkdir -p /opt/ssh-deploy/vps/ssh-deploy-api /var/lib/ssh-deploy /etc/ssh-deploy
 chown -R sshdeploy:sshdeploy /opt/ssh-deploy /var/lib/ssh-deploy
 chmod 750 /etc/ssh-deploy /var/lib/ssh-deploy
+chmod 640 /etc/ssh-deploy/ssh-deploy.env
 ```
 
-## 2. 上传 server.py
+## 2. 生成 Bearer token
 
 ```bash
-# 从本仓拷(server.py 已在本目录)
-scp vps/ssh-deploy-api/server.py root@8.163.106.31:/opt/ssh-deploy/server.py
-ssh root@8.163.106.31 'chown sshdeploy:sshdeploy /opt/ssh-deploy/server.py && chmod 755 /opt/ssh-deploy/server.py'
-```
-
-## 3. 写 Bearer token(env 文件)
-
-```bash
-ssh root@8.163.106.31
+# 32+ 字节随机
+python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+# 写到 env file
 cat > /etc/ssh-deploy/ssh-deploy.env <<EOF
-BEARER_TOKEN=wukong_ssh_2026_secret_xxx
+BEARER_TOKEN=<粘贴上面那串>
 API_PORT=8081
 SSH_DEPLOY_DATA_DIR=/var/lib/ssh-deploy
 EOF
-chmod 600 /etc/ssh-deploy/ssh-deploy.env
+chown sshdeploy:sshdeploy /etc/ssh-deploy/ssh-deploy.env
+chmod 640 /etc/ssh-deploy/ssh-deploy.env
 ```
 
-**主人替换 `wukong_ssh_2026_secret_xxx` 为自己的 token**,然后在客户端脚本里同步用同一 token.
-
-## 4. 装 systemd unit
+## 3. 部署 server.py
 
 ```bash
-scp vps/ssh-deploy-api.service root@8.163.106.31:/etc/systemd/system/ssh-deploy-api.service
-ssh root@8.163.106.31 '
-  systemctl daemon-reload
-  systemctl enable --now ssh-deploy-api
-  systemctl status ssh-deploy-api
-'
+# 从本仓拷
+scp vps/ssh-deploy-api/server.py root@8.163.106.31:/opt/ssh-deploy/vps/ssh-deploy-api/server.py
+ssh root@8.163.106.31 'chown sshdeploy:sshdeploy /opt/ssh-deploy/vps/ssh-deploy-api/server.py && chmod 644 /opt/ssh-deploy/vps/ssh-deploy-api/server.py'
 ```
 
-应看到 `active (running)`.
+## 4. systemd service
 
-## 5. 配 nginx
+`/etc/systemd/system/ssh-deploy-api.service`:
+
+```ini
+[Unit]
+Description=ssh-deploy API (device directory + long-polling)
+After=network.target
+
+[Service]
+Type=simple
+User=sshdeploy
+Group=sshdeploy
+EnvironmentFile=/etc/ssh-deploy/ssh-deploy.env
+ExecStart=/usr/bin/python3 /opt/ssh-deploy/vps/ssh-deploy-api/server.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+`/etc/systemd/system/ssh-deploy-api.service.d/hardening.conf` (drop-in):
+
+```ini
+[Service]
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/ssh-deploy
+PrivateTmp=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+ProtectClock=yes
+ProtectProc=invisible
+ProcSubset=pid
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+AmbientCapabilities=
+```
 
 ```bash
-scp vps/nginx-ssh-deploy.conf root@8.163.106.31:/etc/nginx/conf.d/ssh-deploy.conf
-ssh root@8.163.106.31 '
-  # 把 nginx conf 里的 "YOUR_TOKEN_HERE" 替成步骤 3 的 token
-  sed -i "s/YOUR_TOKEN_HERE/wukong_ssh_2026_secret_xxx/" /etc/nginx/conf.d/ssh-deploy.conf
-  # ⚠️  nginx conf 现含明文 token — 收紧权限,别让 nginx worker / 其他用户读到
-  chmod 640 /etc/nginx/conf.d/ssh-deploy.conf
-  chown root:sshdeploy /etc/nginx/conf.d/ssh-deploy.conf
-  nginx -t
-  systemctl reload nginx
-'
+systemctl daemon-reload
+systemctl enable ssh-deploy-api
+systemctl start ssh-deploy-api
 ```
 
-> **nginx conf 含明文 token 风险**:默认 644 任何用户可读。chmod 640 + group=sshdeploy 后,仅 root + sshdeploy 用户可读。**token 泄露面**:`cp / tar / chattr / git` 操作时误带;改走 unix socket + header 校验可根除(留待 v2)。
+## 5. nginx 反代
 
-## 6. 防火墙放 8080
+`/etc/nginx/conf.d/ssh-deploy.conf` — 从本仓 `vps/nginx-ssh-deploy.conf` 拷,把 `YOUR_TOKEN_HERE` 换成 `/etc/ssh-deploy/ssh-deploy.env` 里的实际 token.
 
 ```bash
-ssh root@8.163.106.31 '
-  ufw allow 8080/tcp   # 或 iptables -A INPUT -p tcp --dport 8080 -j ACCEPT
-'
+# 从 env file 读 token,塞进 map
+python3 - <<'PYEOF'
+import re
+env = dict(line.strip().split('=', 1) for line in open('/etc/ssh-deploy/ssh-deploy.env') if '=' in line and not line.startswith('#'))
+p = '/etc/nginx/conf.d/ssh-deploy.conf'
+s = open(p).read()
+s = s.replace('"Bearer YOUR_TOKEN_HERE"', f'"Bearer {env["BEARER_TOKEN"]}"')
+open(p, 'w').write(s)
+PYEOF
+
+nginx -t
+# 注: 本环境 reload 不刷 worker 配置,必须 stop+start
+systemctl stop nginx && systemctl start nginx
 ```
 
-## 7. 自检
+## 6. 防火墙
 
-```bash
-# 健康(免 token)
-curl -s http://8.163.106.31:8080/healthz
-# {"ok": true, "ts": "..."}
+VPS 上两层都要放(ufw + 云安全组):
 
-# 鉴权失败
-curl -s -o /dev/null -w "%{http_code}\n" http://8.163.106.31:8080/ssh-deploy/hosts
-# 应回 403
-
-# 鉴权通过
-TOKEN=wukong_ssh_2026_secret_xxx
-curl -s -H "Authorization: Bearer $TOKEN" http://8.163.106.31:8080/ssh-deploy/hosts
-# {"version": "1.0", "servers": []}
-
-# 注册一台
-curl -s -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -X POST http://8.163.106.31:8080/ssh-deploy/register \
-  -d '{"name":"home","vps_host":"8.163.106.31","ssh_port":6000,"ssh_user":"WuKong","desc":"DESKTOP-WK"}'
-```
-
-## 8. hosts.json 备份(cron)
-
-```bash
-ssh root@8.163.106.31 '
-  cat > /etc/cron.daily/ssh-deploy-backup <<EOF
-#!/bin/bash
-cp /var/lib/ssh-deploy/hosts.json /var/lib/ssh-deploy/hosts.json.bak.\$(date +%Y%m%d)
-ls -1 /var/lib/ssh-deploy/hosts.json.bak.* | tail -n +8 | xargs -r rm
-EOF
-  chmod 755 /etc/cron.daily/ssh-deploy-backup
-'
-```
-
-## 故障排查
-
-| 症状 | 看哪 |
+| 端口 | 用途 |
 |---|---|
-| 502 Bad Gateway | `systemctl status ssh-deploy-api` / `journalctl -u ssh-deploy-api -n 50` |
-| 403 但 token 正确 | `nginx -T | grep ssh_deploy_auth_ok` 看 map 块 |
-| 数据丢了 | `/var/lib/ssh-deploy/hosts.json.bak.YYYYMMDD` |
-| Bearer token 泄露 | `ssh root@8.163.106.31 'sed -i ... /etc/ssh-deploy/ssh-deploy.env && systemctl restart ssh-deploy-api'` |
+| 22/tcp | SSH 兜底 |
+| 7000/tcp | frp 控制 |
+| 6000/tcp / 6001/tcp | frp 转发 |
+| 8080/tcp | ssh-deploy-api(nginx) |
+
+## 7. 端到端验证
+
+```bash
+TOKEN=$(grep '^BEARER_TOKEN=' /etc/ssh-deploy/ssh-deploy.env | cut -d= -f2-)
+curl -s http://127.0.0.1:8080/healthz | python3 -m json.tool
+# 期望: {"ok": true, "version": "2.0", "devices_online": N, ...}
+
+curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8080/device/list | python3 -m json.tool
+
+curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8080/status | python3 -m json.tool
+```
+
+## 8. 升级 / 回滚
+
+- 升级: 重复步骤 3-5 即可(数据 dir 不动)
+- 回滚: `cp /opt/ssh-deploy/vps/ssh-deploy-api/server.py.v1.bak.* /opt/ssh-deploy/vps/ssh-deploy-api/server.py` + `systemctl restart ssh-deploy-api`
+
+## 9. 改 Bearer token
+
+- 改 `/etc/ssh-deploy/ssh-deploy.env` 里的 `BEARER_TOKEN=`
+- 重跑第 5 步的 `python3` 替换 nginx map 里的 token
+- `systemctl restart ssh-deploy-api`
+- `systemctl restart nginx` (本环境必须 stop+start)
