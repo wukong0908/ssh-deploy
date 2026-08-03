@@ -156,11 +156,16 @@ class Handler(BaseHTTPRequestHandler):
 
     def _send_json(self, code, payload):
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body)
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError) as e:
+            sys.stderr.write(f"[send_json] write_err code={code} err={e}\n"); sys.stderr.flush()
 
     def _read_body(self):
         length = int(self.headers.get("Content-Length", "0"))
@@ -253,11 +258,14 @@ class Handler(BaseHTTPRequestHandler):
         device_id = str(body.get("device_id", "")).strip()
         device_name = str(body.get("device_name", "")).strip()
         caps = body.get("capabilities", {})
+        sys.stderr.write(f"[register] start id={device_id} name={device_name}\n"); sys.stderr.flush()
         if not device_id or not device_name:
             self._send_json(400, {"error": "device_id and device_name required"})
             return
         with _lock:
+            sys.stderr.write(f"[register] got lock\n"); sys.stderr.flush()
             data = _devices()
+            sys.stderr.write(f"[register] loaded devices n={len(data.get('devices', []))}\n"); sys.stderr.flush()
             now = _now_iso()
             existing = next((d for d in data["devices"] if d["device_id"] == device_id), None)
             if existing:
@@ -278,10 +286,14 @@ class Handler(BaseHTTPRequestHandler):
                     "last_seen": now,
                     "online": True,
                 })
-            # 在 lock 外保存 (避免 _save_devices → _wake_waiters → 后续 _wake_all lock 重入死锁)
+            sys.stderr.write(f"[register] releasing lock\n"); sys.stderr.flush()
+        sys.stderr.write(f"[register] saving\n"); sys.stderr.flush()
         _save_devices(data)
+        sys.stderr.write(f"[register] waking all\n"); sys.stderr.flush()
         _wake_all()
+        sys.stderr.write(f"[register] sending json\n"); sys.stderr.flush()
         self._send_json(200, {"ok": True, "device_name": device_name})
+        sys.stderr.write(f"[register] done\n"); sys.stderr.flush()
 
     def _device_heartbeat(self, body):
         device_id = str(body.get("device_id", "")).strip()
