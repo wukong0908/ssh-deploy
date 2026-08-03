@@ -221,11 +221,12 @@ function Get-VpsHostsJson {
         return $null
     }
     try {
-        $url = "http://${VpsHost}:8080/ssh-deploy/hosts"
+        $url = "http://${VpsHost}:8080/device/list"
         $resp = Invoke-RestMethod -Uri $url -Headers (Get-VpsHeaders) -TimeoutSec 15 -ErrorAction Stop
-        return $resp
+        # 兼容老 caller: 把 devices 包装成 servers 字段
+        return @{ version = $resp.version; servers = $resp.devices }
     } catch {
-        Write-Host "⚠️  拉 VPS hosts 失败:$($_.Exception.Message)" -ForegroundColor Yellow
+        Write-Host "⚠️  拉 VPS device list 失败:$($_.Exception.Message)" -ForegroundColor Yellow
         return $null
     }
 }
@@ -236,38 +237,49 @@ function Register-ThisHost {
         Write-Host "需要 -BearerToken" -ForegroundColor Yellow
         return $false
     }
-    $payload = @{
-        name = $ServerName
-        vps_host = $VpsHost
-        ssh_port = $FrpSshPort
-        ssh_user = $LocalUser
-        alias = "wpc-$ServerName"
-        desc = $env:COMPUTERNAME
-    } | ConvertTo-Json -Compress
-    try {
-        $url = "http://${VpsHost}:8080/ssh-deploy/register"
-        $resp = Invoke-RestMethod -Uri $url -Method POST -ContentType 'application/json' -Headers (Get-VpsHeaders) -Body $payload -TimeoutSec 8 -ErrorAction Stop
-        Write-Host "✅ 已注册 $($resp.registered.name) → port $($resp.registered.ssh_port) user $($resp.registered.ssh_user)" -ForegroundColor Green
-        return $true
-    } catch {
-        $err = $_
-        # 409 端口冲突:VPS API 返回 error.detail,告诉主人换端口
-        if ($err.Exception.Response) {
-            $code = [int]$err.Exception.Response.StatusCode
-            if ($code -eq 409) {
-                try {
-                    $stream = $err.Exception.Response.GetResponseStream()
-                    $reader = New-Object System.IO.StreamReader($stream)
-                    $body = $reader.ReadToEnd() | ConvertFrom-Json
-                    Write-Host "❌ 端口冲突:$($body.detail)" -ForegroundColor Red
-                    Write-Host "   解决:重跑 Install 时换 FRP SSH 转发端口(避免 6000/6001 等已被占用)" -ForegroundColor Yellow
-                } catch {
-                    Write-Host "❌ 端口冲突(409)" -ForegroundColor Red
-                }
-                return $false
+    # 优先用 Syncthing device_id (新 API 要求);无则 hostname 临时 id
+    $syncthingCfg = Join-Path $env:LOCALAPPDATA 'Syncthing\config.xml'
+    $deviceId = $null
+    if (Test-Path $syncthingCfg) {
+        try {
+            $c = [xml](Get-Content $syncthingCfg -Raw)
+            $deviceId = $c.syncthing.device.id
+        } catch {}
+    }
+    if (-not $deviceId) {
+        Write-Host "⚠️  Syncthing 未装 / config.xml 无 device id" -ForegroundColor Yellow
+        Write-Host "    推荐: 菜单 [8] Syncthing 协同 → [1] 装 Syncthing → [2] 登记本机到 VPS" -ForegroundColor Yellow
+        $useFallback = Read-Host "继续用 hostname 临时 id 注册? (y/n)"
+        if ($useFallback -ne 'y') { return $false }
+        # 临时 id: hostname-epoch (避免冲突)
+        $deviceId = "$($ServerName)-$(Get-Date -UFormat '%s')-tmp"
+    }
+    # frpc remote_port 从 frpc.toml 读 (Win 端迁移后路径)
+    $frpcPort = $FrpSshPort
+    if (-not $frpcPort -or $frpcPort -eq 0) {
+        $frpcToml = 'C:\frp\frpc.toml'
+        if (Test-Path $frpcToml) {
+            foreach ($line in Get-Content $frpcToml) {
+                if ($line -match '^\s*remotePort\s*=\s*(\d+)') { $frpcPort = [int]$Matches[1]; break }
             }
         }
-        Write-Host "❌ register 失败:$($err.Exception.Message)" -ForegroundColor Red
+    }
+    $payload = @{
+        device_id    = $deviceId
+        device_name  = $ServerName
+        capabilities = @{
+            sshd      = @{ user = $LocalUser }
+            frpc      = if ($frpcPort) { @{ remote_port = $frpcPort } } else { $null }
+            syncthing = @{ folders = @() }
+        }
+    } | ConvertTo-Json -Compress -Depth 5
+    try {
+        $url = "http://${VpsHost}:8080/device/register"
+        $resp = Invoke-RestMethod -Uri $url -Method POST -ContentType 'application/json' -Headers (Get-VpsHeaders) -Body $payload -TimeoutSec 8 -ErrorAction Stop
+        Write-Host "✅ 已注册 $($resp.device_name) (device_id=$deviceId)" -ForegroundColor Green
+        return $true
+    } catch {
+        Write-Host "❌ register 失败:$($_.Exception.Message)" -ForegroundColor Red
         return $false
     }
 }
@@ -288,28 +300,30 @@ function Unregister-Host {
         Write-Host "❌ 无 Bearer token,不能注销" -ForegroundColor Red
         return $false
     }
-    # VpsHost 兜底
     if (-not $VpsHost) { $VpsHost = $DEFAULT_VPS; $script:VpsHost = $DEFAULT_VPS }
 
-    $hosts = Get-VpsHostsJson
-    if (-not $hosts -or -not $hosts.servers -or $hosts.servers.Count -eq 0) {
+    $resp = Get-VpsHostsJson
+    if (-not $resp -or -not $resp.servers -or $resp.servers.Count -eq 0) {
         Write-Host "VPS 当前无主机注册" -ForegroundColor Yellow
         return $false
     }
 
     Write-Host ""
     Write-Host "--- VPS 当前注册主机 ---" -ForegroundColor Cyan
-    $hosts.servers | ForEach-Object {
-        $isThis = if ($_.name -eq $env:COMPUTERNAME.ToLower()) { " ← 本机" } else { "" }
-        Write-Host ("  {0,-20} port {1,-5} user {2}{3}" -f $_.name, $_.ssh_port, $_.ssh_user, $isThis) -ForegroundColor $(if ($isThis){'Green'}else{'Gray'})
+    $resp.servers | ForEach-Object {
+        $frpcPort = if ($_.capabilities -and $_.capabilities.frpc) { $_.capabilities.frpc.remote_port } else { '-' }
+        $user = if ($_.capabilities -and $_.capabilities.sshd) { $_.capabilities.sshd.user } else { '-' }
+        $isThis = if ($_.device_name -eq $env:COMPUTERNAME.ToLower()) { " ← 本机" } else { "" }
+        Write-Host ("  {0,-20} port {1,-5} user {2}{3}" -f $_.device_name, $frpcPort, $user, $isThis) -ForegroundColor $(if ($isThis){'Green'}else{'Gray'})
     }
     Write-Host ""
-    $target = Read-Host "输入要注销的主机名(name)"
+    $target = Read-Host "输入要注销的主机名(device_name)"
     if (-not $target) {
         Write-Host "❌ 取消(空输入)" -ForegroundColor Yellow
         return $false
     }
-    if (-not ($hosts.servers | Where-Object { $_.name -eq $target })) {
+    $targetDev = $resp.servers | Where-Object { $_.device_name -eq $target } | Select-Object -First 1
+    if (-not $targetDev) {
         Write-Host "❌ VPS 无此主机:$target" -ForegroundColor Red
         return $false
     }
@@ -319,21 +333,21 @@ function Unregister-Host {
         return $false
     }
     try {
-        $url = "http://${VpsHost}:8080/ssh-deploy/unregister"
-        $payload = @{ name = $target } | ConvertTo-Json -Compress
-        $resp = Invoke-RestMethod -Uri $url -Method POST -ContentType 'application/json' -Headers (Get-VpsHeaders) -Body $payload -TimeoutSec 8 -ErrorAction Stop
-        Write-Host "✅ 已注销 '$target'(移除 $($resp.removed) 条)" -ForegroundColor Green
+        $url = "http://${VpsHost}:8080/device/deregister"
+        $payload = @{ device_id = $targetDev.device_id } | ConvertTo-Json -Compress
+        $resp2 = Invoke-RestMethod -Uri $url -Method POST -ContentType 'application/json' -Headers (Get-VpsHeaders) -Body $payload -TimeoutSec 8 -ErrorAction Stop
+        Write-Host "✅ 已注销 '$target'(移除 $($resp2.removed) 条)" -ForegroundColor Green
         return $true
     } catch {
-        Write-Host "❌ unregister 失败:$($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "❌ deregister 失败:$($_.Exception.Message)" -ForegroundColor Red
         return $false
     }
 }
 
 # ---------- helper: SSH config 生成 ----------
 function Generate-SSHConfigFromVPS {
-    $hosts = Get-VpsHostsJson
-    if (-not $hosts -or -not $hosts.servers) {
+    $resp = Get-VpsHostsJson
+    if (-not $resp -or -not $resp.servers) {
         Write-Host "VPS 无主机清单(空或拉取失败),跳过 SSH config 生成" -ForegroundColor Yellow
         return
     }
@@ -353,16 +367,19 @@ function Generate-SSHConfigFromVPS {
         [System.IO.File]::WriteAllText($cfg, $content, [System.Text.UTF8Encoding]::new($false))
     }
 
-    # 逐 server 写
-    foreach ($s in $hosts.servers) {
-        $vps = if ($s.vps_host) { $s.vps_host } else { $VpsHost }
+    # 逐 device 写
+    foreach ($s in $resp.servers) {
+        $frpc = $s.capabilities.frpc
+        if (-not $frpc -or -not $frpc.remote_port) { continue }
+        $user = if ($s.capabilities.sshd) { $s.capabilities.sshd.user } else { $env:USERNAME }
+        $alias = "wpc-$($s.device_name)"
         $segment = @"
 
-# ===== ssh-deploy: $($s.name) =====
-Host $($s.alias)
-    HostName $vps
-    Port $($s.ssh_port)
-    User $($s.ssh_user)
+# ===== ssh-deploy: $($s.device_name) =====
+Host $alias
+    HostName $VpsHost
+    Port $($frpc.remote_port)
+    User $user
     PreferredAuthentications password
     PubkeyAuthentication no
     StrictHostKeyChecking accept-new
@@ -372,7 +389,7 @@ Host $($s.alias)
 # ===== END ssh-deploy =====
 "@
         [System.IO.File]::AppendAllText($cfg, $segment, [System.Text.UTF8Encoding]::new($false))
-        Write-Host "  ✅ alias $($s.alias) → $vps :$($s.ssh_port) user $($s.ssh_user)" -ForegroundColor Green
+        Write-Host "  ✅ alias $alias → $VpsHost :$($frpc.remote_port) user $user" -ForegroundColor Green
     }
 }
 
