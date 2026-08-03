@@ -68,6 +68,7 @@ $script:startTime = Get-Date
 #region Module 0 — Constants + Logging
 
 $script:VERSION = 'v3.0'
+$script:CommitShort = 'a13145f'   # 同步手动 — raw 拉的时候验
 
 $script:DEFAULT_VPS = '8.163.106.31'
 $script:DEFAULT_PORT = 6000
@@ -1465,8 +1466,21 @@ function Invoke-MenuLoop {
 #region Entry
 
 # boot banner
-Write-Host "ssh-deploy v$($script:VERSION) starting..." -ForegroundColor DarkGray
+Write-Host "ssh-deploy v$($script:VERSION) ($script:CommitShort) starting..." -ForegroundColor DarkGray
 Write-Host "  VPS: $($script:State.VpsHost)  Mode: $($script:State.InstallMode)  Bearer: $($script:State.BearerToken.Substring(0, [Math]::Min(8, $script:State.BearerToken.Length)))..." -ForegroundColor DarkGray
+
+# Tern 自检 — 抓老版本缓存 (param([bool]$C, ...)) 直接爆错
+try {
+    $null = Tern $null 'a' 'b'
+    $null = Tern '' 'a' 'b'
+    $null = Tern 0 'a' 'b'
+    $null = Tern @() 'a' 'b'
+} catch {
+    Write-Host "[FATAL] Tern 函数签名错误 — 你跑的是老版本 ($TEMP\ssh-deploy.ps1 缓存)" -ForegroundColor Red
+    Write-Host "        修法: Remove-Item '$TEMP\ssh-deploy.ps1' -Force; 重新拉 + 跑" -ForegroundColor Red
+    Write-Host "        当前 commit 应为 $script:CommitShort" -ForegroundColor Red
+    throw
+}
 
 # entry dispatch
 if ($MyInvocation.ExpectingInput) {
