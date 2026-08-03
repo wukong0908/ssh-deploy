@@ -68,7 +68,7 @@ $script:startTime = Get-Date
 #region Module 0 — Constants + Logging
 
 $script:VERSION = 'v3.0'
-$script:CommitShort = '8d4f1a2'   # 同步手动 — raw 拉的时候验
+$script:CommitShort = '2c9d8a3'   # 同步手动 — raw 拉的时候验
 
 $script:DEFAULT_VPS = '8.163.106.31'
 $script:DEFAULT_PORT = 6000
@@ -251,6 +251,7 @@ function Initialize-TokenCache {
         Write-Err "复制 token 文档失败: $($_.Exception.Message)" -Critical
         return $false
     }
+}
 
 # ── ~/.ssh ACL helper — 解锁读 / 写 (OpenSSH 装时收紧 ACL, 当前 admin 默认无 R/W) ──
 function Unlock-SshFile {
@@ -279,11 +280,6 @@ function Write-SshConfig {
         [System.IO.File]::WriteAllText($script:SshCfg, $Content, [System.Text.UTF8Encoding]::new($false))
     } catch {
         Write-Warn "写 ~/.ssh/config 失败: $($_.Exception.Message)"
-    }
-}
-    catch {
-        Write-Err "复制 token 文档失败: $($_.Exception.Message)" -Critical
-        return $false
     }
 }
 
