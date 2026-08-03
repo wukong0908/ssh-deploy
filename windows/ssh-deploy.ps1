@@ -68,7 +68,7 @@ $script:startTime = Get-Date
 #region Module 0 — Constants + Logging
 
 $script:VERSION = 'v3.0'
-$script:CommitShort = '99ae264'   # 同步手动 — raw 拉的时候验
+$script:CommitShort = 'f54b6cb'   # 同步手动 — raw 拉的时候验
 
 $script:DEFAULT_VPS = '8.163.106.31'
 $script:DEFAULT_PORT = 6000
@@ -247,6 +247,36 @@ function Initialize-TokenCache {
         Write-Info "  (ACL 限当前用户 R/W + SYSTEM R)"
         return $true
     }
+
+# ── ~/.ssh ACL helper — 解锁读 / 写 (OpenSSH 装时收紧 ACL, 当前 admin 默认无 R/W) ──
+function Unlock-SshFile {
+    param([string]$Path)
+    if (-not (Test-Path $Path)) { return }
+    try { Set-ItemProperty -Path $Path -Name IsReadOnly -Value $false -ErrorAction Stop } catch {}
+    $me = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    try { icacls $Path /grant:r "${me}:(M)" 2>&1 | Out-Null } catch {}
+}
+
+function Read-SshConfig {
+    if (-not (Test-Path $script:SshCfg)) { return '' }
+    Unlock-SshFile $script:SshCfg
+    try {
+        return Get-Content $script:SshCfg -Raw -ErrorAction Stop
+    } catch {
+        Write-Warn "读 ~/.ssh/config 失败: $($_.Exception.Message)"
+        return ''
+    }
+}
+
+function Write-SshConfig {
+    param([string]$Content)
+    Unlock-SshFile $script:SshCfg
+    try {
+        [System.IO.File]::WriteAllText($script:SshCfg, $Content, [System.Text.UTF8Encoding]::new($false))
+    } catch {
+        Write-Warn "写 ~/.ssh/config 失败: $($_.Exception.Message)"
+    }
+}
     catch {
         Write-Err "复制 token 文档失败: $($_.Exception.Message)" -Critical
         return $false
@@ -700,7 +730,7 @@ function Invoke-PreCheck {
     Write-Info "  痕迹:"
     $oldFrp = 'C:\Tools\frp'
     Write-Host ("    C:\Tools\frp (老): $(Tern (Test-Path $oldFrp) '⚠  存在,要清' '✅ 无')")
-    $cfgRaw = if (Test-Path $script:SshCfg) { Get-Content $script:SshCfg -Raw -ErrorAction SilentlyContinue } else { '' }
+    $cfgRaw = Read-SshConfig
     Write-Host ("    ~/.ssh/config 段: $(Tern ($cfgRaw -match '# ===== ssh-deploy:') '⚠  存在,要清' '✅ 无')")
     $oldTask = Get-ScheduledTask 'frpc-autostart' -ErrorAction SilentlyContinue
     Write-Host ("    frpc-autostart (老任务): $(Tern $oldTask '⚠  存在,要清' '✅ 无')")
@@ -1111,7 +1141,7 @@ function Sync-SshConfigFromVps {
 
     # 写 ~/.ssh/config wpc-* 段
     if (-not (Test-Path $script:SshDir)) { New-Item -ItemType Directory -Path $script:SshDir -Force | Out-Null }
-    $cfgRaw = if (Test-Path $script:SshCfg) { Get-Content $script:SshCfg -Raw } else { '' }
+    $cfgRaw = Read-SshConfig
     $cfgRaw = [regex]::Replace($cfgRaw, $script:MarkerConfig, '')
 
     $newBlock = "# ===== ssh-deploy: do not edit this block manually =====`n"
@@ -1124,7 +1154,7 @@ function Sync-SshConfigFromVps {
     }
     $newBlock += "# ===== END ssh-deploy =====`n`n"
     $cfgRaw = $newBlock + $cfgRaw
-    [System.IO.File]::WriteAllText($script:SshCfg, $cfgRaw, [System.Text.UTF8Encoding]::new($false))
+    Write-SshConfig $cfgRaw
     Write-Info "  ~/.ssh/config 写了 $($devices.Count) 个 wpc-* 段"
     return @{ ok = $true; count = $devices.Count }
 }
@@ -1348,9 +1378,9 @@ function Invoke-Uninstall {
 
     # 5. 清 ~/.ssh/config ssh-deploy 段
     if (Test-Path $script:SshCfg) {
-        $raw = Get-Content $script:SshCfg -Raw
+        $raw = Read-SshConfig
         $raw = [regex]::Replace($raw, $script:MarkerConfig, '')
-        [System.IO.File]::WriteAllText($script:SshCfg, $raw, [System.Text.UTF8Encoding]::new($false))
+        Write-SshConfig $raw
     }
     # 6. 清 PROFILE alias 段
     if (Test-Path $script:ProfilePath) {
