@@ -479,7 +479,7 @@ def main():
 
     threading.Thread(target=_heartbeat_checker, daemon=True).start()
 
-    addr = ("127.0.0.1", LISTEN_PORT)
+    addr = ("0.0.0.0", LISTEN_PORT)
     print(f"ssh-deploy-api listening on {addr[0]}:{addr[1]}", file=sys.stderr)
     print(f"data: {DATA_DIR}", file=sys.stderr)
     srv = ThreadingHTTPServer(addr, Handler)

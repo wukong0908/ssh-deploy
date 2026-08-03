@@ -201,22 +201,22 @@ while ($true) {
         # 心跳
         $hbBody = @{ device_id = $selfId } | ConvertTo-Json -Compress
         try {
-            Invoke-RestMethod -Uri "http://${defaultVps}:8080/device/heartbeat" -Method POST `
+            Invoke-RestMethod -Uri "http://${defaultVps}:8081/device/heartbeat" -Method POST `
                 -ContentType 'application/json' -Headers @{ Authorization = "Bearer $token" } `
                 -Body $hbBody -TimeoutSec 5 -ErrorAction Stop | Out-Null
         } catch { Write-Host "[poller] 心跳失败:$($_.Exception.Message)" -ForegroundColor Yellow }
 
         # 长轮询变更
-        $url = "http://${defaultVps}:8080/device/changes?since=$($state.last_ts)&wait=30"
+        $url = "http://${defaultVps}:8081/device/changes?since=$($state.last_ts)&wait=30"
         $resp = Invoke-RestMethod -Uri $url -Headers @{ Authorization = "Bearer $token" } `
             -TimeoutSec 40 -ErrorAction Stop
 
         if ($resp.changes -and $resp.changes.Count -gt 0) {
             Write-Host "[poller] 收到 $($resp.changes.Count) 条变更" -ForegroundColor Cyan
             # 重拉全量 (避免 partial 拼接)
-            $dev = Invoke-RestMethod -Uri "http://${defaultVps}:8080/device/list" `
+            $dev = Invoke-RestMethod -Uri "http://${defaultVps}:8081/device/list" `
                 -Headers @{ Authorization = "Bearer $token" } -TimeoutSec 8 -ErrorAction Stop
-            $shr = Invoke-RestMethod -Uri "http://${defaultVps}:8080/shared/list" `
+            $shr = Invoke-RestMethod -Uri "http://${defaultVps}:8081/shared/list" `
                 -Headers @{ Authorization = "Bearer $token" } -TimeoutSec 8 -ErrorAction Stop
             Update-SshConfig -Devices $dev.devices
             Update-SyncthingConfig -Devices $dev.devices -Shared $shr.folders

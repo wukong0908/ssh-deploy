@@ -221,7 +221,7 @@ function Get-VpsHostsJson {
         return $null
     }
     try {
-        $url = "http://${VpsHost}:8080/device/list"
+        $url = "http://${VpsHost}:8081/device/list"
         $resp = Invoke-RestMethod -Uri $url -Headers (Get-VpsHeaders) -TimeoutSec 15 -ErrorAction Stop
         # 兼容老 caller: 把 devices 包装成 servers 字段
         return @{ version = $resp.version; servers = $resp.devices }
@@ -280,7 +280,7 @@ function Register-ThisHost {
         capabilities = $caps
     } | ConvertTo-Json -Compress -Depth 10
     try {
-        $url = "http://${VpsHost}:8080/device/register"
+        $url = "http://${VpsHost}:8081/device/register"
         $resp = Invoke-RestMethod -Uri $url -Method POST -ContentType 'application/json' -Headers (Get-VpsHeaders) -Body $payload -TimeoutSec 8 -ErrorAction Stop
         Write-Host "✅ 已注册 $($resp.device_name) (device_id=$deviceId)" -ForegroundColor Green
         return $true
@@ -339,7 +339,7 @@ function Unregister-Host {
         return $false
     }
     try {
-        $url = "http://${VpsHost}:8080/device/deregister"
+        $url = "http://${VpsHost}:8081/device/deregister"
         $payload = @{ device_id = $targetDev.device_id } | ConvertTo-Json -Compress
         $resp2 = Invoke-RestMethod -Uri $url -Method POST -ContentType 'application/json' -Headers (Get-VpsHeaders) -Body $payload -TimeoutSec 8 -ErrorAction Stop
         Write-Host "✅ 已注销 '$target'(移除 $($resp2.removed) 条)" -ForegroundColor Green
@@ -1023,10 +1023,10 @@ function Invoke-PreCheck {
     Write-Host ""
     Write-Host "网络:" -ForegroundColor DarkGray
     $ghOk    = (Test-NetConnection 'raw.githubusercontent.com' -Port 443 -InformationLevel Quiet -WarningAction SilentlyContinue) -eq $true
-    $apiOk   = (Test-NetConnection $VpsHost -Port 8080 -InformationLevel Quiet -WarningAction SilentlyContinue) -eq $true
+    $apiOk   = (Test-NetConnection $VpsHost -Port 8081 -InformationLevel Quiet -WarningAction SilentlyContinue) -eq $true
     $frpsOk  = (Test-NetConnection $VpsHost -Port 7000 -InformationLevel Quiet -WarningAction SilentlyContinue) -eq $true
     Write-Host "  GitHub raw (:443)    : $(if ($ghOk){'✅ 通'}else{'❌ 不通'})"
-    Write-Host "  VPS ssh-deploy-api   : $(if ($apiOk){'✅ :8080 通'}else{'❌ :8080 不通'})"
+    Write-Host "  VPS ssh-deploy-api   : $(if ($apiOk){'✅ :8081 通'}else{'❌ :8081 不通'})"
     Write-Host "  VPS frps             : $(if ($frpsOk){'✅ :7000 通'}else{'❌ :7000 不通'})"
 
     # 环境软件
@@ -1492,7 +1492,7 @@ function Register-DeviceToVPS {
         }
     } | ConvertTo-Json -Compress
     try {
-        $r = Invoke-RestMethod -Uri "http://$($script:SyncthingDefaultVps):8080/device/register" `
+        $r = Invoke-RestMethod -Uri "http://$($script:SyncthingDefaultVps):8081/device/register" `
             -Method POST -ContentType 'application/json' `
             -Headers @{ Authorization = "Bearer $token" } `
             -Body $body -TimeoutSec 8 -ErrorAction Stop
@@ -1586,7 +1586,7 @@ function Show-DeviceDirectory {
     $token = Get-BearerTokenLocal
     if (-not $token) { Write-Host "没 BEARER_TOKEN" -ForegroundColor Red; return }
     try {
-        $r = Invoke-RestMethod -Uri "http://$($script:SyncthingDefaultVps):8080/device/list" `
+        $r = Invoke-RestMethod -Uri "http://$($script:SyncthingDefaultVps):8081/device/list" `
             -Headers @{ Authorization = "Bearer $token" } -TimeoutSec 8 -ErrorAction Stop
         Write-Host ""
         Write-Host "===== VPS 设备目录 =====" -ForegroundColor Cyan
@@ -1596,7 +1596,7 @@ function Show-DeviceDirectory {
             $idShort = $d.device_id.Substring(0, [Math]::Min(14, $d.device_id.Length))
             Write-Host ("  {0,-20} {1,-15} {2}  frpc:{3}" -f $d.device_name, $idShort, $onl, $frpc)
         }
-        $r2 = Invoke-RestMethod -Uri "http://$($script:SyncthingDefaultVps):8080/shared/list" `
+        $r2 = Invoke-RestMethod -Uri "http://$($script:SyncthingDefaultVps):8081/shared/list" `
             -Headers @{ Authorization = "Bearer $token" } -TimeoutSec 8 -ErrorAction Stop
         Write-Host ""
         Write-Host "===== 共享文件夹 =====" -ForegroundColor Cyan
@@ -1619,13 +1619,13 @@ function Create-SharedFolder {
     $path = Read-Host "本机文件夹路径"
     if (-not $path) { return }
     try {
-        $r = Invoke-RestMethod -Uri "http://$($script:SyncthingDefaultVps):8080/shared/create" `
+        $r = Invoke-RestMethod -Uri "http://$($script:SyncthingDefaultVps):8081/shared/create" `
             -Method POST -ContentType 'application/json' `
             -Headers @{ Authorization = "Bearer $token" } `
             -Body (@{ folder_id = $folderId; name = $name } | ConvertTo-Json -Compress) `
             -TimeoutSec 8 -ErrorAction Stop
         Write-Host "共享已创建: $($r.folder_id)" -ForegroundColor Green
-        $r2 = Invoke-RestMethod -Uri "http://$($script:SyncthingDefaultVps):8080/shared/join" `
+        $r2 = Invoke-RestMethod -Uri "http://$($script:SyncthingDefaultVps):8081/shared/join" `
             -Method POST -ContentType 'application/json' `
             -Headers @{ Authorization = "Bearer $token" } `
             -Body (@{ device_id = $devId; folder_id = $folderId; folder_path = $path } | ConvertTo-Json -Compress) `
@@ -1640,7 +1640,7 @@ function Join-SharedFolder {
     $token = Get-BearerTokenLocal
     if (-not $token) { Write-Host "没 BEARER_TOKEN" -ForegroundColor Red; return }
     try {
-        $r = Invoke-RestMethod -Uri "http://$($script:SyncthingDefaultVps):8080/shared/list" `
+        $r = Invoke-RestMethod -Uri "http://$($script:SyncthingDefaultVps):8081/shared/list" `
             -Headers @{ Authorization = "Bearer $token" } -TimeoutSec 8 -ErrorAction Stop
         Write-Host ""
         for ($i = 0; $i -lt $r.folders.Count; $i++) {
@@ -1654,7 +1654,7 @@ function Join-SharedFolder {
         $path = Read-Host "本机文件夹路径"
         if (-not $path) { return }
         $devId = Get-DeviceIdFromSyncthing
-        $r2 = Invoke-RestMethod -Uri "http://$($script:SyncthingDefaultVps):8080/shared/join" `
+        $r2 = Invoke-RestMethod -Uri "http://$($script:SyncthingDefaultVps):8081/shared/join" `
             -Method POST -ContentType 'application/json' `
             -Headers @{ Authorization = "Bearer $token" } `
             -Body (@{ device_id = $devId; folder_id = $target.folder_id; folder_path = $path } | ConvertTo-Json -Compress) `
@@ -1669,7 +1669,7 @@ function Leave-SharedFolder {
     $token = Get-BearerTokenLocal
     if (-not $token) { Write-Host "没 BEARER_TOKEN" -ForegroundColor Red; return }
     try {
-        $r = Invoke-RestMethod -Uri "http://$($script:SyncthingDefaultVps):8080/shared/list" `
+        $r = Invoke-RestMethod -Uri "http://$($script:SyncthingDefaultVps):8081/shared/list" `
             -Headers @{ Authorization = "Bearer $token" } -TimeoutSec 8 -ErrorAction Stop
         Write-Host ""
         $devId = Get-DeviceIdFromSyncthing
@@ -1683,7 +1683,7 @@ function Leave-SharedFolder {
         $idx = (Read-Host "选 [1-$($r.folders.Count)]") -as [int]
         if ($idx -lt 1 -or $idx -gt $r.folders.Count) { return }
         $target = $r.folders[$idx - 1]
-        $r2 = Invoke-RestMethod -Uri "http://$($script:SyncthingDefaultVps):8080/shared/leave" `
+        $r2 = Invoke-RestMethod -Uri "http://$($script:SyncthingDefaultVps):8081/shared/leave" `
             -Method POST -ContentType 'application/json' `
             -Headers @{ Authorization = "Bearer $token" } `
             -Body (@{ device_id = $devId; folder_id = $target.folder_id } | ConvertTo-Json -Compress) `
