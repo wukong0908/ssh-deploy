@@ -32,7 +32,10 @@ function Get-DeviceId {
     if (-not (Test-Path $syncthingConfig)) { return $null }
     try {
         $cfg = [xml](Get-Content $syncthingConfig -Raw)
-        return $cfg.syncthing.device.id
+        # Syncthing 旧版根元素 <syncthing>, 新版 (>=1.x) 根元素 <configuration>
+        if ($cfg.configuration.device.id) { return $cfg.configuration.device.id }
+        if ($cfg.syncthing.device.id)    { return $cfg.syncthing.device.id }
+        return $null
     } catch { return $null }
 }
 
@@ -99,23 +102,27 @@ function Update-SyncthingConfig {
     param([array]$Devices, [array]$Shared)
     if (-not (Test-Path $syncthingConfig)) { return }
     $cfg = [xml](Get-Content $syncthingConfig -Raw)
+    # 新版 (>=1.x) 根元素 <configuration>, 老版 <syncthing>
+    if ($cfg.configuration) { $root = $cfg.configuration }
+    elseif ($cfg.syncthing) { $root = $cfg.syncthing }
+    else { return }
     $selfId = (Get-DeviceId)
 
     # 设备列表 (排除自己)
     $validDeviceIds = @($selfId) + @($Devices | Where-Object { $_.device_id -ne $selfId } | ForEach-Object { $_.device_id })
     # 删多余 device 节点
-    while ($cfg.syncthing.device) {
-        $node = $cfg.syncthing.device
+    while ($root.device) {
+        $node = $root.device
         $id = $node.id
         if ($validDeviceIds -notcontains $id) {
-            $cfg.syncthing.RemoveChild($node) | Out-Null
+            $root.RemoveChild($node) | Out-Null
         } else {
             break
         }
     }
     # 加新 device
     foreach ($d in ($Devices | Where-Object { $_.device_id -ne $selfId })) {
-        if ($cfg.syncthing.SelectSingleNode("//device[@id='$($d.device_id)']")) { continue }
+        if ($cfg.SelectSingleNode("//device[@id='$($d.device_id)']")) { continue }
         $node = $cfg.CreateElement('device')
         $node.SetAttribute('id', $d.device_id)
         $node.SetAttribute('name', $d.device_name)
@@ -125,20 +132,20 @@ function Update-SyncthingConfig {
         $addr = $cfg.CreateElement('address')
         $addr.InnerText = 'dynamic'
         $node.AppendChild($addr)
-        $cfg.syncthing.AppendChild($node) | Out-Null
+        $root.AppendChild($node) | Out-Null
     }
 
     # folder
     $validFolderIds = @($Shared | ForEach-Object { $_.folder_id })
     # 删多余 folder
-    foreach ($f in @($cfg.syncthing.folder)) {
+    foreach ($f in @($root.folder)) {
         if ($validFolderIds -notcontains $f.id) {
-            $cfg.syncthing.RemoveChild($f) | Out-Null
+            $root.RemoveChild($f) | Out-Null
         }
     }
     # 加新 folder
     foreach ($s in $Shared) {
-        if ($cfg.syncthing.SelectSingleNode("//folder[@id='$($s.folder_id)']")) { continue }
+        if ($cfg.SelectSingleNode("//folder[@id='$($s.folder_id)']")) { continue }
         $member = $s.members | Where-Object { $_.device_id -eq $selfId } | Select-Object -First 1
         $folderPath = if ($member) { $member.folder_path } else { "D:\$($s.folder_id)" }
         $folder = $cfg.CreateElement('folder')
@@ -159,7 +166,7 @@ function Update-SyncthingConfig {
             $dv.SetAttribute('id', $m.device_id)
             $folder.AppendChild($dv)
         }
-        $cfg.syncthing.AppendChild($folder) | Out-Null
+        $root.AppendChild($folder) | Out-Null
     }
 
     $cfg.Save($syncthingConfig)

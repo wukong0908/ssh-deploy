@@ -243,7 +243,9 @@ function Register-ThisHost {
     if (Test-Path $syncthingCfg) {
         try {
             $c = [xml](Get-Content $syncthingCfg -Raw)
-            $deviceId = $c.syncthing.device.id
+            # Syncthing 新版根元素 <configuration>, 老版 <syncthing>
+            if ($c.configuration.device.id) { $deviceId = $c.configuration.device.id }
+            elseif ($c.syncthing.device.id) { $deviceId = $c.syncthing.device.id }
         } catch {}
     }
     if (-not $deviceId) {
@@ -1379,7 +1381,10 @@ function Get-DeviceIdFromSyncthing {
     if (-not (Test-Path $script:SyncthingConfig)) { return $null }
     try {
         $cfg = [xml](Get-Content $script:SyncthingConfig -Raw)
-        return $cfg.syncthing.device.id
+        # Syncthing 旧版根元素 <syncthing>, 新版 (>=1.x) 根元素 <configuration>
+        if ($cfg.configuration.device.id) { return $cfg.configuration.device.id }
+        if ($cfg.syncthing.device.id)    { return $cfg.syncthing.device.id }
+        return $null
     } catch { return $null }
 }
 
