@@ -221,6 +221,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
+        if path not in ("/device/register", "/device/heartbeat", "/device/deregister",
+                        "/shared/create", "/shared/join", "/shared/leave"):
+            self._send_json(404, {"error": "not found"})
+            return
         if not _check_auth(self):
             return
         body = self._read_body()
@@ -239,8 +243,6 @@ class Handler(BaseHTTPRequestHandler):
             self._shared_join(body)
         elif path == "/shared/leave":
             self._shared_leave(body)
-        else:
-            self._send_json(404, {"error": "not found"})
 
     # ----- device handlers -----
     def _device_register(self, body):
