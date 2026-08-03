@@ -377,7 +377,10 @@ function Generate-SSHConfigFromVPS {
     foreach ($s in $resp.servers) {
         $frpc = $s.capabilities.frpc
         if (-not $frpc -or -not $frpc.remote_port) { continue }
-        $user = if ($s.capabilities.sshd) { $s.capabilities.sshd.user } else { $env:USERNAME }
+        $user = $env:USERNAME
+        if ($s.capabilities.sshd -and $s.capabilities.sshd.user) {
+            $user = $s.capabilities.sshd.user
+        }
         $alias = "wpc-$($s.device_name)"
         $segment = @"
 
@@ -503,6 +506,11 @@ function Get-RegisterParams {
     $nameInput = Read-Host "VPS 注册名 [$defaultName]"
     if ($nameInput) { $ServerName = $nameInput } else { $ServerName = $defaultName }
     $script:ServerName = $ServerName
+    # LocalUser 每次也重问 (Generate-SSHConfigFromVPS 依赖它写 ssh config User 字段)
+    $defaultUser = $env:USERNAME
+    $userInput = Read-Host "本机 SSH 账号 [$defaultUser]"
+    if ($userInput) { $LocalUser = $userInput } else { $LocalUser = $defaultUser }
+    $script:LocalUser = $LocalUser
 }
 
 # ---------- 1. OpenSSH Server install ----------
