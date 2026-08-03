@@ -486,10 +486,22 @@ pause
 
 function Test-NetworkEgress {
     <#
-    测到 VPS :8081 可达 (不调实际 API, 用 TCP connect).
-    PreCheck 用.
+    测到 VPS :8081 可达 (TCP connect, 5s timeout).
+    不用 Test-NetConnection -TimeoutSec (PS 5.1 cmdlet 早期版本无此参数).
     #>
-    $isOpen = (Test-NetConnection -ComputerName $script:State.VpsHost -Port 8081 -TimeoutSec 5 -WarningAction SilentlyContinue).TcpTestSucceeded
+    $isOpen = $false
+    try {
+        $tcp = New-Object System.Net.Sockets.TcpClient
+        $iar = $tcp.BeginConnect($script:State.VpsHost, 8081, $null, $null)
+        $ok = $iar.AsyncWaitHandle.WaitOne(5000, $false)
+        if ($ok) {
+            $tcp.EndConnect($iar)
+            $isOpen = $true
+        }
+        $tcp.Close()
+    } catch {
+        $isOpen = $false
+    }
 
     if ($isOpen) {
         Write-Host "端口 8081 开放，服务正常。"
