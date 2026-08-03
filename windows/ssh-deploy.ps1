@@ -68,7 +68,7 @@ $script:startTime = Get-Date
 #region Module 0 — Constants + Logging
 
 $script:VERSION = 'v3.0'
-$script:CommitShort = '2c9d8a3'   # 同步手动 — raw 拉的时候验
+$script:CommitShort = 'b8c4f29'   # 同步手动 — raw 拉的时候验
 
 $script:DEFAULT_VPS = '8.163.106.31'
 $script:DEFAULT_PORT = 6000
@@ -208,6 +208,21 @@ function Initialize-State {
     $script:State.ServerName = if ($ServerName) { $ServerName } else { ($env:COMPUTERNAME).ToLower() }
     $script:State.FrpcPort = if ($FrpSshPort -gt 0) { $FrpSshPort } else { $script:DEFAULT_PORT }
     $script:State.InstallMode = $InstallMode
+
+    # 无显式 param 时 prompt 主人确认/改写 server name + frp remote port
+    if (-not $ServerName -and -not $FrpSshPort -and $MyInvocation.ExpectingInput) {
+        Write-Host ""
+        Write-Host "  === 主机标识 / 端口 ===" -ForegroundColor Cyan
+        $defaultName = $script:State.ServerName
+        $input = Read-Host "  server name (默认 $defaultName,直接回车接受)"
+        if ($input) { $script:State.ServerName = $input.ToLower() }
+        $defaultPort = $script:State.FrpcPort
+        $inputPort = Read-Host "  frp remote port (默认 $defaultPort,直接回车接受)"
+        if ($inputPort -and [int]::TryParse($inputPort, [ref]([int]0)) -and [int]$inputPort -gt 0) {
+            $script:State.FrpcPort = [int]$inputPort
+        }
+        Write-Host ""
+    }
 
     # Token: param > secrets file > 首次 prompt
     if ($BearerToken) {
