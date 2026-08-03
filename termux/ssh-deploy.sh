@@ -103,24 +103,34 @@ fetch_vps_hosts() {
         warn "无 VPS_HOST,跳过"
         return 1
     fi
-    local url="http://${VPS_HOST}:${DEFAULT_VPS_API_PORT}/ssh-deploy/hosts"
+    local url="http://${VPS_HOST}:${DEFAULT_VPS_API_PORT}/device/list"
     log "拉 $url"
     local resp
     resp=$(curl -fsS --max-time 8 -H "Authorization: Bearer $BEARER_TOKEN" "$url" 2>&1) || {
-        warn "拉 VPS hosts 失败:$resp"
+        warn "拉 VPS device list 失败:$resp"
         return 1
     }
     echo "$resp"
 }
 
-# JSON → TSV: 用 grep + sed + paste 拆每个 server 对象,避免依赖 python/jq
-# 输入: VPS 返回的 {"servers":[{...},{...}]}
-# 输出: 每 4 行 → 1 行 TSV: name\tport\tuser\talias
-# vps_host 不输出(所有 server 都走同一 $VPS_HOST,留空字段会触发 bash IFS 空吞 bug)
+# JSON → TSV: 用 python3 拆 capabilities 嵌套,避免依赖 jq
+# 输入: VPS 返回的 {"version":"1.0","devices":[{device_id,device_name,capabilities:{sshd:{user},frpc:{remote_port}},...}]}
+# 输出: 每行 TSV: device_name\tport\tuser
+# alias 字段不存在(v2 派生 = "wpc-<device_name>"),generator 自填
 parse_hosts() {
-    echo "$1" | grep -oE '"(name|ssh_port|ssh_user|alias)":[[:space:]]*("[^"]*"|[0-9]+)' \
-        | sed -E 's/^"(name|ssh_port|ssh_user|alias)":[[:space:]]*//; s/^"(.*)"$/\1/; s/"$//' \
-        | paste - - - -
+    echo "$1" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+for dev in d.get("devices", []):
+    name = dev.get("device_name", "")
+    caps = dev.get("capabilities") or {}
+    frpc = caps.get("frpc") or {}
+    sshd = caps.get("sshd") or {}
+    port = frpc.get("remote_port", "")
+    user = sshd.get("user", "")
+    if name:
+        print(f"{name}\t{port}\t{user}")
+' 2>/dev/null
 }
 
 generate_ssh_config() {
@@ -234,7 +244,7 @@ show_status() {
     echo "--- VPS 主机清单 ---"
     local json
     json=$(fetch_vps_hosts) && {
-        parse_hosts "$json" | awk -F'\t' '{ printf "  %-12s port %-5s user %-10s alias %s\n", $1, $2, $3, $4 }'
+        parse_hosts "$json" | awk -F'\t' '{ printf "  %-12s port %-5s user %s\n", $1, $2, $3 }'
     } || warn "  (无 / 拉不到)"
 }
 

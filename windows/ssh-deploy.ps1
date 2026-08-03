@@ -32,7 +32,7 @@
 
 .EXAMPLE
     # PS 7+ 不认 `irm | iex`,走两步:下文件 → 调
-    $tmp = "$env:TEMP\ssh-deploy.ps1"; Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/wukong0908/ssh-deploy/<commit>/win/ssh-deploy.ps1' -OutFile $tmp -UseBasicParsing; & $tmp
+    $tmp = "$env:TEMP\ssh-deploy.ps1"; Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/wukong0908/ssh-deploy/<commit>/windows/ssh-deploy.ps1' -OutFile $tmp -UseBasicParsing; & $tmp
     # 交互式
 #>
 
@@ -911,8 +911,9 @@ function Add-PowerShellAliases {
     }
     $aliasBlock = "`n# ===== ssh-deploy aliases ====="
     foreach ($s in $hosts.servers) {
-        $fn = "ssh-$($s.name)"
-        $aliasBlock += "`nfunction $fn { ssh $($s.alias) }`nSet-Alias -Name wpc-$($s.name) -Value $fn`n"
+        $aliasName = $s.device_name
+        $fn = "ssh-$($aliasName)"
+        $aliasBlock += "`nfunction $fn { ssh wpc-$($aliasName) }`nSet-Alias -Name wpc-$($aliasName) -Value $fn`n"
     }
     $aliasBlock += "# ===== END ssh-deploy aliases =====`n"
     [System.IO.File]::AppendAllText($PROFILE, $aliasBlock, [System.Text.UTF8Encoding]::new($false))
@@ -966,7 +967,10 @@ function Show-Status {
     $hosts = Get-VpsHostsJson
     if ($hosts -and $hosts.servers) {
         foreach ($s in $hosts.servers) {
-            Write-Host ("  {0,-10} port {1,-5} user {2,-10} alias {3}" -f $s.name, $s.ssh_port, $s.ssh_user, $s.alias) -ForegroundColor Green
+            $frpcPort = if ($s.capabilities -and $s.capabilities.frpc) { $s.capabilities.frpc.remote_port } else { '-' }
+            $user = if ($s.capabilities -and $s.capabilities.sshd) { $s.capabilities.sshd.user } else { '-' }
+            $onl = if ($s.online) { 'online' } else { 'offline' }
+            Write-Host ("  {0,-14} port {1,-5} user {2,-10} {3}" -f $s.device_name, $frpcPort, $user, $onl) -ForegroundColor Green
         }
     } else {
         Write-Host "  (无 / 拉不到)" -ForegroundColor Yellow
@@ -1223,7 +1227,7 @@ function Invoke-Uninstall {
     Write-Host ""
     Write-Host "========== Uninstall ssh-deploy ==========" -ForegroundColor Yellow
     Write-Host "本机将要清:"
-    Write-Host "  - VPS hosts.json 本机条目(若有 Bearer)"
+    Write-Host "  - VPS devices.json 本机条目(若有 Bearer)"
     Write-Host "  - sshd 服务(停 + 禁自启 + 卸 OpenSSH.Server capability)"
     Write-Host "  - 防火墙规则 :22 (sshd)"
     Write-Host "  - frpc 进程 + 计划任务 frpc-autostart(本脚本创的)"
