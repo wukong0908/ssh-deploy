@@ -272,7 +272,8 @@ class Handler(BaseHTTPRequestHandler):
                     "last_seen": now,
                     "online": True,
                 })
-            _save_devices(data)
+            # 在 lock 外保存 (避免 _save_devices → _wake_waiters → 后续 _wake_all lock 重入死锁)
+        _save_devices(data)
         _wake_all()
         self._send_json(200, {"ok": True, "device_name": device_name})
 
@@ -281,6 +282,7 @@ class Handler(BaseHTTPRequestHandler):
         if not device_id:
             self._send_json(400, {"error": "device_id required"})
             return
+        need_wake = False
         with _lock:
             data = _devices()
             now = _now_iso()
@@ -291,10 +293,12 @@ class Handler(BaseHTTPRequestHandler):
                 d["online"] = True
                 if was_offline:
                     _save_devices(data)
-                    _wake_all()
+                    need_wake = True
             else:
                 self._send_json(404, {"error": "device not registered"})
                 return
+        if need_wake:
+            _wake_all()
         self._send_json(200, {"ok": True})
 
     def _device_deregister(self, body):
@@ -316,6 +320,7 @@ class Handler(BaseHTTPRequestHandler):
                 s["members"] = [m for m in s.get("members", []) if m.get("device_id") != device_id]
             _save_shared(shr)
             _save_devices(data)
+        # NOTE: 不在 lock 内调 _wake_all(), 会死锁 (Python Lock 不可重入)
         _wake_all()
         self._send_json(200, {"ok": True, "removed": before - after})
 
@@ -329,7 +334,7 @@ class Handler(BaseHTTPRequestHandler):
         with _lock:
             shr = _shared()
             if any(s["folder_id"] == folder_id for s in shr["folders"]):
-                self._send_json(409, {"error": "folder_id exists"})
+                self._send_json(409, {"error": "folder_id_exists"})
                 return
             now = _now_iso()
             shr["folders"].append({
@@ -354,7 +359,7 @@ class Handler(BaseHTTPRequestHandler):
             shr = _shared()
             folder = next((s for s in shr["folders"] if s["folder_id"] == folder_id), None)
             if not folder:
-                self._send_json(404, {"error": "folder not found"})
+                self._send_json(404, {"error": "folder_not_found"})
                 return
             now = _now_iso()
             existing = next((m for m in folder["members"] if m["device_id"] == device_id), None)
@@ -392,7 +397,7 @@ class Handler(BaseHTTPRequestHandler):
             shr = _shared()
             folder = next((s for s in shr["folders"] if s["folder_id"] == folder_id), None)
             if not folder:
-                self._send_json(404, {"error": "folder not found"})
+                self._send_json(404, {"error": "folder_not_found"})
                 return
             before = len(folder["members"])
             folder["members"] = [m for m in folder["members"] if m["device_id"] != device_id]
