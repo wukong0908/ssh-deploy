@@ -631,14 +631,19 @@ function Invoke-PreCheck {
     # 3. 网络 egress 到 VPS
     $tcpOk = Test-NetworkEgress
     Write-Host ("  network → $($script:State.VpsHost):8081: $(Tern $tcpOk '✅ TCP 通' '❌ 不通')")
+    # VPS API 检查 — 包 try/catch, 失败不阻断 PreCheck
     if ($tcpOk) {
-        $list = Get-VpsDeviceList
-        if ($list) {
-            $n = if ($list.devices) { $list.devices.Count } else { 0 }
-            Write-Host "  VPS API: ✅ GET /device/list (devices=$n)"
-        }
-        else {
-            Write-Host "  VPS API: ❌ /device/list 失败 — $($script:State.LastApiError)"
+        try {
+            $list = Get-VpsDeviceList
+            if ($list) {
+                $n = if ($list.devices) { $list.devices.Count } else { 0 }
+                Write-Host "  VPS API: ✅ GET /device/list (devices=$n)"
+            }
+            else {
+                Write-Host "  VPS API: ❌ /device/list 失败 — $($script:State.LastApiError)"
+            }
+        } catch {
+            Write-Host "  VPS API: ❌ 异常 — $($_.Exception.Message)"
         }
     }
 
