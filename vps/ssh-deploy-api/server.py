@@ -301,6 +301,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": "device_id required"})
             return
         need_wake = False
+        not_registered = False
         with _lock:
             data = _devices()
             now = _now_iso()
@@ -313,8 +314,10 @@ class Handler(BaseHTTPRequestHandler):
                     _save_devices(data)
                     need_wake = True
             else:
-                self._send_json(404, {"error": "device not registered"})
-                return
+                not_registered = True
+        if not_registered:
+            self._send_json(404, {"error": "device not registered"})
+            return
         if need_wake:
             _wake_all()
         self._send_json(200, {"ok": True})
@@ -324,20 +327,24 @@ class Handler(BaseHTTPRequestHandler):
         if not device_id:
             self._send_json(400, {"error": "device_id required"})
             return
+        not_found = False
         with _lock:
             data = _devices()
             before = len(data["devices"])
             data["devices"] = [d for d in data["devices"] if d["device_id"] != device_id]
             after = len(data["devices"])
             if before == after:
-                self._send_json(404, {"error": "device not found"})
-                return
-            # 同时从 shared folders 移除
-            shr = _shared()
-            for s in shr.get("folders", []):
-                s["members"] = [m for m in s.get("members", []) if m.get("device_id") != device_id]
-            _save_shared(shr)
-            _save_devices(data)
+                not_found = True
+            else:
+                # 同时从 shared folders 移除
+                shr = _shared()
+                for s in shr.get("folders", []):
+                    s["members"] = [m for m in s.get("members", []) if m.get("device_id") != device_id]
+                _save_shared(shr)
+                _save_devices(data)
+        if not_found:
+            self._send_json(404, {"error": "device not found"})
+            return
         # NOTE: 不在 lock 内调 _wake_all(), 会死锁 (Python Lock 不可重入)
         _wake_all()
         self._send_json(200, {"ok": True, "removed": before - after})
@@ -349,20 +356,24 @@ class Handler(BaseHTTPRequestHandler):
         if not folder_id:
             self._send_json(400, {"error": "folder_id required"})
             return
+        conflict = False
         with _lock:
             shr = _shared()
             if any(s["folder_id"] == folder_id for s in shr["folders"]):
-                self._send_json(409, {"error": "folder_id_exists"})
-                return
-            now = _now_iso()
-            shr["folders"].append({
-                "folder_id": folder_id,
-                "name": name,
-                "members": [],
-                "created_at": now,
-                "updated_at": now,
-            })
-            _save_shared(shr)
+                conflict = True
+            else:
+                now = _now_iso()
+                shr["folders"].append({
+                    "folder_id": folder_id,
+                    "name": name,
+                    "members": [],
+                    "created_at": now,
+                    "updated_at": now,
+                })
+                _save_shared(shr)
+        if conflict:
+            self._send_json(409, {"error": "folder_id_exists"})
+            return
         _wake_all()
         self._send_json(200, {"ok": True, "folder_id": folder_id})
 
@@ -373,35 +384,39 @@ class Handler(BaseHTTPRequestHandler):
         if not device_id or not folder_id:
             self._send_json(400, {"error": "device_id and folder_id required"})
             return
+        not_found = False
         with _lock:
             shr = _shared()
             folder = next((s for s in shr["folders"] if s["folder_id"] == folder_id), None)
             if not folder:
-                self._send_json(404, {"error": "folder_not_found"})
-                return
-            now = _now_iso()
-            existing = next((m for m in folder["members"] if m["device_id"] == device_id), None)
-            if existing:
-                existing["folder_path"] = folder_path
-                existing["joined_at"] = now
+                not_found = True
             else:
-                folder["members"].append({
-                    "device_id": device_id,
-                    "folder_path": folder_path,
-                    "joined_at": now,
-                })
-            folder["updated_at"] = now
-            _save_shared(shr)
-            # 同步把 device.capabilities.syncthing.folders 加上
-            data = _devices()
-            dev = next((d for d in data["devices"] if d["device_id"] == device_id), None)
-            if dev:
-                folders = dev.setdefault("capabilities", {}).setdefault("syncthing", {}).setdefault("folders", [])
-                if folder_id not in folders:
-                    folders.append(folder_id)
-                dev["last_update"] = now
-                dev["online"] = True
-                _save_devices(data)
+                now = _now_iso()
+                existing = next((m for m in folder["members"] if m["device_id"] == device_id), None)
+                if existing:
+                    existing["folder_path"] = folder_path
+                    existing["joined_at"] = now
+                else:
+                    folder["members"].append({
+                        "device_id": device_id,
+                        "folder_path": folder_path,
+                        "joined_at": now,
+                    })
+                folder["updated_at"] = now
+                _save_shared(shr)
+                # 同步把 device.capabilities.syncthing.folders 加上
+                data = _devices()
+                dev = next((d for d in data["devices"] if d["device_id"] == device_id), None)
+                if dev:
+                    folders = dev.setdefault("capabilities", {}).setdefault("syncthing", {}).setdefault("folders", [])
+                    if folder_id not in folders:
+                        folders.append(folder_id)
+                    dev["last_update"] = now
+                    dev["online"] = True
+                    _save_devices(data)
+        if not_found:
+            self._send_json(404, {"error": "folder_not_found"})
+            return
         _wake_all()
         self._send_json(200, {"ok": True, "members": folder["members"]})
 
@@ -411,25 +426,31 @@ class Handler(BaseHTTPRequestHandler):
         if not device_id or not folder_id:
             self._send_json(400, {"error": "device_id and folder_id required"})
             return
+        not_found = False
+        before = 0
+        after = 0
         with _lock:
             shr = _shared()
             folder = next((s for s in shr["folders"] if s["folder_id"] == folder_id), None)
             if not folder:
-                self._send_json(404, {"error": "folder_not_found"})
-                return
-            before = len(folder["members"])
-            folder["members"] = [m for m in folder["members"] if m["device_id"] != device_id]
-            after = len(folder["members"])
-            folder["updated_at"] = _now_iso()
-            _save_shared(shr)
-            data = _devices()
-            dev = next((d for d in data["devices"] if d["device_id"] == device_id), None)
-            if dev:
-                folders = dev.get("capabilities", {}).get("syncthing", {}).get("folders", [])
-                if folder_id in folders:
-                    folders.remove(folder_id)
-                dev["last_update"] = _now_iso()
-                _save_devices(data)
+                not_found = True
+            else:
+                before = len(folder["members"])
+                folder["members"] = [m for m in folder["members"] if m["device_id"] != device_id]
+                after = len(folder["members"])
+                folder["updated_at"] = _now_iso()
+                _save_shared(shr)
+                data = _devices()
+                dev = next((d for d in data["devices"] if d["device_id"] == device_id), None)
+                if dev:
+                    folders = dev.get("capabilities", {}).get("syncthing", {}).get("folders", [])
+                    if folder_id in folders:
+                        folders.remove(folder_id)
+                    dev["last_update"] = _now_iso()
+                    _save_devices(data)
+        if not_found:
+            self._send_json(404, {"error": "folder_not_found"})
+            return
         _wake_all()
         self._send_json(200, {"ok": True, "removed": before - after})
 
