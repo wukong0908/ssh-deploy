@@ -104,6 +104,9 @@ systemctl enable ssh-deploy-api
 systemctl start ssh-deploy-api
 ```
 
+**可选 drop-in**(环境变量备份):
+`/etc/systemd/system/ssh-deploy-api.service.d/ssh-deploy-env.conf` — 内容可与 `/etc/ssh-deploy/ssh-deploy.env` 一致. 主环境变量已由 `EnvironmentFile=` 提供,本 drop-in 仅防 env 文件路径变更时服务仍能启动.
+
 ## 5. nginx 反代
 
 `/etc/nginx/conf.d/ssh-deploy.conf` — 从本仓 `vps/nginx-ssh-deploy.conf` 拷,把 `YOUR_TOKEN_HERE` 换成 `/etc/ssh-deploy/ssh-deploy.env` 里的实际 token.
@@ -133,7 +136,8 @@ VPS 上两层都要放(ufw + 云安全组):
 | 22/tcp | SSH 兜底 |
 | 7000/tcp | frp 控制 |
 | 6000/tcp / 6001/tcp | frp 转发 |
-| 8080/tcp | ssh-deploy-api(nginx) |
+| 8080/tcp | ssh-deploy-api(nginx, **唯一公网入口**) |
+| 8081/tcp | ssh-deploy-api direct, **仅本机 127.0.0.1**, ufw/ECS SG 不放(防绕过 nginx Bearer) |
 
 ## 7. 端到端验证
 

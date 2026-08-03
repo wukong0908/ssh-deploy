@@ -148,6 +148,24 @@ def _safe_device_id(s):
     return s
 
 
+def _validate_caps(caps):
+    """capabilities.syncthing.folders 必须 list[str]; 其它自由结构."""
+    if not isinstance(caps, dict):
+        raise ValueError("capabilities must be object")
+    syn = caps.get("syncthing")
+    if syn is not None:
+        if not isinstance(syn, dict):
+            raise ValueError("capabilities.syncthing must be object")
+        folders = syn.get("folders")
+        if folders is not None:
+            if not isinstance(folders, list):
+                raise ValueError("capabilities.syncthing.folders must be list of strings")
+            for f in folders:
+                if not isinstance(f, str) or not DEVICE_ID_RE.match(f):
+                    raise ValueError("capabilities.syncthing.folders entries must match id pattern")
+    return caps
+
+
 def _validate_device_register(body):
     """返 (device_id, device_name, owner, capabilities) 或抛 ValueError."""
     if not isinstance(body, dict):
@@ -159,9 +177,7 @@ def _validate_device_register(body):
     owner = str(body.get("owner", "wukong0908")).strip()
     if not owner or len(owner) > 64:
         raise ValueError("owner required, max 64 chars")
-    caps = body.get("capabilities", {})
-    if not isinstance(caps, dict):
-        raise ValueError("capabilities must be object")
+    caps = _validate_caps(body.get("capabilities", {}))
     return device_id, device_name, owner, caps
 
 
@@ -276,8 +292,9 @@ def _collect_changes_since(since_ts):
         ts_str = d.get("last_update") or d.get("registered_at")
         d_ts = _parse_ts(ts_str)
         if d_ts > since_ts:
+            is_update = d.get("last_update") and d.get("last_update") != d.get("registered_at")
             changes.append({
-                "op": "update" if d.get("updated_at") else "register",
+                "op": "update" if is_update else "register",
                 "device_id": d.get("device_id"),
                 "device_name": d.get("device_name"),
                 "capabilities": d.get("capabilities", {}),
@@ -850,11 +867,16 @@ def _heartbeat_checker():
                         changed = True
                 if changed:
                     _atomic_save(DEVICE_FILE, data)
+                    off_count = sum(1 for d in data["devices"] if not d.get("online", True))
+                else:
+                    off_count = 0
         except (RuntimeError, OSError) as e:
             _log("error", "heartbeat_checker_failed", op="checker", err=str(e))
-        if 'changed' in dir() and changed:
+            changed = False
+            off_count = 0
+        if changed:
             _wake_all()
-            _log("info", "devices_marked_offline", op="checker", count=sum(1 for d in data["devices"] if not d.get("online", True)))
+            _log("info", "devices_marked_offline", op="checker", count=off_count)
 
 
 # ============== main ==============
