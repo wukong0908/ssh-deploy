@@ -726,21 +726,30 @@ function Install-Frpc {
         return
     }
 
-    # 三态检测:frpc-bg 任务 + C:\frp\frpc.exe + C:\frp\frpc.toml
+    # 四态检测:frpc-bg 任务 + frpc.exe + frpc.toml + frpc 进程 alive
     # 任一缺失 → 完整重建(包含 frpc-bg 计划任务带 RestartOnFailure,frpc 死了自动拉)
     $taskOk = [bool](Get-ScheduledTask frpc-bg -ErrorAction SilentlyContinue)
     $exePath = Join-Path $FrpcInstallDir 'frpc.exe'
     $tomlPath = Join-Path $FrpcInstallDir 'frpc.toml'
     $exeOk = (Test-Path $exePath) -and (Get-Item $exePath).Length -gt 1MB
     $tomlOk = Test-Path $tomlPath
-    if ($taskOk -and $exeOk -and $tomlOk) {
-        Write-Host "✅ frpc 环境完整(task + exe + toml),无需重建" -ForegroundColor Green
+    $frpcProc = (Get-Process -Name frpc -ErrorAction SilentlyContinue)
+    $procOk = [bool]$frpcProc
+    if ($taskOk -and $exeOk -and $tomlOk -and $procOk) {
+        Write-Host "✅ frpc 健康(task + exe + toml + 进程 alive),无需重建" -ForegroundColor Green
     } else {
-        Write-Host "⚠️  检测到缺失:" -ForegroundColor Yellow
+        Write-Host "⚠️  检测到异常:" -ForegroundColor Yellow
         Write-Host "    task:    $taskOk" -ForegroundColor DarkGray
         Write-Host "    exe:     $exeOk  ($exePath)" -ForegroundColor DarkGray
         Write-Host "    toml:    $tomlOk  ($tomlPath)" -ForegroundColor DarkGray
-        Write-Host "    → 开始重建..." -ForegroundColor Yellow
+        Write-Host "    proc:    $procOk  (PID=$($frpcProc.Id -join ','))" -ForegroundColor DarkGray
+        Write-Host "    → 开始修复..." -ForegroundColor Yellow
+        # 异常态:只要进程死了 / 任务没了,直接先 kill 残留再重装
+        if ($frpcProc) {
+            Write-Host "  先停掉残留 frpc 进程..." -ForegroundColor Cyan
+            $frpcProc | Stop-Process -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 2
+        }
     }
 
     # 1) 建目录
@@ -851,9 +860,53 @@ transport.useCompression = true
 
     $tmpXml = Join-Path $env:TEMP 'frpc-bg.xml'
     [System.IO.File]::WriteAllText($tmpXml, $xml, [System.Text.UTF8Encoding]::new($false))
-    Register-ScheduledTask -TaskName frpc-bg -Xml (Get-Content $tmpXml -Raw) -Force | Out-Null
+    $regErr = $null
+    try {
+        Register-ScheduledTask -TaskName frpc-bg -Xml (Get-Content $tmpXml -Raw) -Force -ErrorAction Stop | Out-Null
+    } catch {
+        $regErr = $_.Exception.Message
+    }
     Remove-Item $tmpXml -Force -ErrorAction SilentlyContinue
-    Write-Host "  ✅ frpc-bg 已注册" -ForegroundColor Green
+    if ($regErr) {
+        # 检测:权限不足 / 用户非管理员 → 写 fallback .bat 提示右键管理员跑
+        Write-Host "  ⚠️  Register-ScheduledTask 失败:$regErr" -ForegroundColor Yellow
+        Write-Host "  检测原因:极可能是当前 shell 非管理员 (需 /RU SYSTEM + RunLevel=HighestAvailable)" -ForegroundColor Yellow
+        $fallbackBat = Join-Path $FrpcInstallDir 'setup-frpc-bg-task.bat'
+        $fallbackContent = @"
+@echo off
+chcp 65001 >nul
+echo === 1. 检查管理员 ===
+net session >nul 2>&1
+if %errorlevel% neq 0 (
+    echo [ERROR] 必须以管理员身份运行此脚本(右键 - 以管理员身份运行)
+    pause
+    exit /b 1
+)
+echo === 2. 删残留 ===
+schtasks /Delete /TN "frpc-bg" /F >nul 2>&1
+echo === 3. 注册 ===
+schtasks /Create /TN "frpc-bg" /TR "C:\frp\frpc.exe -c C:\frp\frpc.toml" /SC ONSTART /DELAY 0000:30 /RU SYSTEM /RL HIGHEST /F
+if %errorlevel% neq 0 (
+    echo [ERROR] schtasks /Create 失败
+    pause
+    exit /b 1
+)
+echo === 4. 重启策略 (失败 1min 重启,最多 999 次) ===
+schtasks /Set /TN "frpc-bg" /RESTART 999 /RESTARTMIN 01 /TIME 00:00:00 /ET 23:59:59
+echo === 5. 立刻跑一次 ===
+schtasks /Run /TN "frpc-bg"
+echo === 6. 验证 ===
+schtasks /Query /TN "frpc-bg" /V /FO LIST
+echo === 完成 ===
+pause
+"@
+        [System.IO.File]::WriteAllText($fallbackBat, $fallbackContent, [System.Text.UTF8Encoding]::new($false))
+        Write-Host "  → 已写 fallback .bat: $fallbackBat" -ForegroundColor Cyan
+        Write-Host "  → 请右键 - 以管理员身份运行该 .bat 后重跑 Install" -ForegroundColor Cyan
+        Write-Host "  → 不阻断主流程(frpc 进程能正常起,只是没守护),见 S4 末尾警告" -ForegroundColor Yellow
+    } else {
+        Write-Host "  ✅ frpc-bg 已注册" -ForegroundColor Green
+    }
 
     # 5) 触发启动 + 等 + 验证
     Write-Host "  触发 frpc-bg /Run + 等 6s..." -ForegroundColor Cyan
@@ -1078,6 +1131,27 @@ function Invoke-PreCheck {
         Write-Host "  $FrpcInstallDir 排除: $(if ($def.ExclusionPath -contains $FrpcInstallDir){'✅ 已加'}else{'⚠️  未加'})"
     } catch {
         Write-Host "  (Defender 未启用 / 权限不足)"
+    }
+
+    # 端到端冒烟(只读,3s 超时):发 wpc-home / similar host 验证反向 SSH 链路
+    Write-Host ""
+    Write-Host "端到端冒烟:" -ForegroundColor DarkGray
+    $cfgRaw = if (Test-Path $cfg) { Get-Content $cfg -Raw -ErrorAction SilentlyContinue } else { '' }
+    $hostBlocks = [regex]::Matches($cfgRaw, 'Host\s+wpc-([\w-]+)')
+    if ($hostBlocks.Count -gt 0) {
+        $first = $hostBlocks[0].Groups[0].Value -replace '^Host\s+',''
+        Write-Host "  测试 ssh $first (3s timeout)..." -ForegroundColor Cyan
+        $smoke = ssh -o BatchMode=yes -o ConnectTimeout=3 -o StrictHostKeyChecking=no $first 'echo SMOKE_OK' 2>&1
+        if ($LASTEXITCODE -eq 0 -and $smoke -match 'SMOKE_OK') {
+            Write-Host "  ✅ ssh $first 通 (反向 SSH 链路活)" -ForegroundColor Green
+        } else {
+            $errLine = ($smoke | Select-Object -Last 1).ToString().Trim()
+            Write-Host "  ❌ ssh $first 失败: $errLine" -ForegroundColor Red
+            Write-Host "     常见原因:frpc 进程死 / frpc-bg 任务没注册 / VPS 6000 拒入 / 阿里云 SG 没放" -ForegroundColor Yellow
+            Write-Host "     修法:菜单 [2] Install 让 S4 自愈,或右键管理员跑 C:\frp\setup-frpc-bg-task.bat" -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "  (无 wpc-* Host 块,跳过)" -ForegroundColor DarkGray
     }
 
     Write-Host "==============================" -ForegroundColor Cyan
