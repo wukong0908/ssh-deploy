@@ -75,7 +75,7 @@ $script:startTime = Get-Date
 # ─────────────────────────────────────────────────────────────────────
 #region Module 0 — Constants + Logging
 
-$script:VERSION = 'v3.13'
+$script:VERSION = 'v3.14'
 
 # CommitShort: 从 $PSScriptRoot/../.git/HEAD 读 (本地开发) 或 fallback 到 'unknown'
 # raw 拉 (无 .git) 时返 'unknown'
@@ -1480,6 +1480,36 @@ function Register-ThisHost {
         Write-Warn "  Syncthing device id 不合法 (无/多/含非法字符), 用临时 UUID: $deviceId"
     }
 
+    # 查冲突 (主人 2026-08-04: device_name 覆盖静默, remote_port 冲突 prompt 确认)
+    $force = $false
+    $list = Invoke-VpsApi -Method GET -Path '/device/list'
+    if ($list -and $list.devices) {
+        # 同 device_name (server 自动覆盖, 仅 INFO)
+        $sameName = @($list.devices | Where-Object { $_.device_name -eq $script:State.ServerName })
+        if ($sameName.Count -gt 0) {
+            Write-Info "  同名 device '$($script:State.ServerName)' 已存在, 将覆盖"
+        }
+        # 端口被**不同** device 占用 → prompt 确认
+        $portOwner = $null
+        foreach ($d in $list.devices) {
+            $p = $d.capabilities.frpc.remote_port
+            if ($p -eq $script:State.FrpcPort -and $d.device_name -ne $script:State.ServerName) {
+                $portOwner = $d
+                break
+            }
+        }
+        if ($portOwner) {
+            Write-Warn "  端口 $($script:State.FrpcPort) 已被 '$($portOwner.device_name)' 占用"
+            $ans = Read-Host "  覆盖占用方? (yes/no)"
+            if ($ans -ne 'yes') {
+                Write-Info "  取消 — 改 frp port 或先 Unregister 占用方"
+                return @{ ok = $false; msg = 'port conflict, cancelled' }
+            }
+            $force = $true
+            Write-Warn "  确认覆盖, 将踢出 '$($portOwner.device_name)'"
+        }
+    }
+
     $body = @{
         device_id    = $deviceId
         device_name  = $script:State.ServerName
@@ -1489,6 +1519,7 @@ function Register-ThisHost {
             frpc      = @{ remote_port = $script:State.FrpcPort }
             syncthing = @{ folders = @() }
         }
+        force        = $force
     }
     $resp = Invoke-VpsApi -Method POST -Path '/device/register' -Body $body
     if ($resp -and ($resp.PSObject.Properties.Name -contains 'device_id' -or $resp.PSObject.Properties.Name -contains 'auth_token')) {
