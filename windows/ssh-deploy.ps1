@@ -67,7 +67,7 @@ $script:startTime = Get-Date
 # ─────────────────────────────────────────────────────────────────────
 #region Module 0 — Constants + Logging
 
-$script:VERSION = 'v3.7'
+$script:VERSION = 'v3.8'
 
 # CommitShort: 从 $PSScriptRoot/../.git/HEAD 读 (本地开发) 或 fallback 到 'unknown'
 # raw 拉 (无 .git) 时返 'unknown'
@@ -547,13 +547,18 @@ function Get-DeviceIdLocal {
     <#
     单一源, 替 v2 三个副本 (ssh-deploy.ps1 L244-249 + L1471-1479 + poller L31-40)
     优先读 Syncthing config.xml; 失败 null.
+    取第一个 device id (config.xml 可能历史残留多个, VPS _safe_device_id
+    regex [A-Za-z0-9._:-]{1,128} 不接受多行拼字符串 → 400).
     #>
     $syncthingCfg = Join-Path $env:LOCALAPPDATA 'Syncthing\config.xml'
     if (-not (Test-Path $syncthingCfg)) { return $null }
     try {
         $x = [xml](Get-Content $syncthingCfg -Raw)
-        if ($x.configuration.device.id) { return $x.configuration.device.id }
-        if ($x.syncthing.device.id) { return $x.syncthing.device.id }
+        $id = $null
+        if ($x.configuration.device[0].id) { $id = $x.configuration.device[0].id }
+        elseif ($x.syncthing.device[0].id) { $id = $x.syncthing.device[0].id }
+        if ($id -is [array]) { $id = $id[0] }
+        return $id
     }
     catch {
         Write-Debug "config.xml 解析失败: $($_.Exception.Message)"
@@ -1473,10 +1478,11 @@ function Register-ThisHost {
     POST /device/register. 替 v2 2 个 Register (Install 自动 + Register-DeviceToVPS).
     #>
     $deviceId = Get-DeviceIdLocal
-    if (-not $deviceId) {
-        # 没有 device id 就用 mac-derived 占位 — 走最普通方式
+    # VPS _safe_device_id regex = [A-Za-z0-9._:-]{1,128}
+    # 旧 config.xml 可能多 device id 残留 / 拼字符串, 必须单值合法
+    if (-not $deviceId -or $deviceId -is [array] -or ($deviceId -notmatch '^[A-Za-z0-9._:-]{1,128}$')) {
         $deviceId = [guid]::NewGuid().ToString()
-        Write-Warn "  没找到 Syncthing device id, 用临时 UUID: $deviceId"
+        Write-Warn "  Syncthing device id 不合法 (无/多/含非法字符), 用临时 UUID: $deviceId"
     }
 
     $body = @{
