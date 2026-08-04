@@ -75,7 +75,7 @@ $script:startTime = Get-Date
 # ─────────────────────────────────────────────────────────────────────
 #region Module 0 — Constants + Logging
 
-$script:VERSION = 'v3.11'
+$script:VERSION = 'v3.12'
 
 # CommitShort: 从 $PSScriptRoot/../.git/HEAD 读 (本地开发) 或 fallback 到 'unknown'
 # raw 拉 (无 .git) 时返 'unknown'
@@ -1144,12 +1144,10 @@ function Install-Frpc {
     }
     Write-Info "  ✅ 拿 frpc.exe [tier=$($exe.Source)] $exe.Path"
 
-    # 装到 C:\frp
-    if ($exe.Source -ne 'installed') {
-        $dest = Join-Path $script:FrpcInstallDir 'frpc.exe'
-        Copy-Item $exe.Path $dest -Force -ErrorAction Stop
-        Write-Info "  装到 $dest"
-    }
+    # 无脑装到 C:\frp (主人 2026-08-04 要求: 不检查存不存在, 覆盖保仓一致)
+    $dest = Join-Path $script:FrpcInstallDir 'frpc.exe'
+    Copy-Item $exe.Path $dest -Force -ErrorAction Stop
+    Write-Info "  装到 $dest (覆盖)"
 
     # 写 frpc.toml
     $toml = @"
