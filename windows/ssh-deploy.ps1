@@ -75,7 +75,7 @@ $script:startTime = Get-Date
 # ─────────────────────────────────────────────────────────────────────
 #region Module 0 — Constants + Logging
 
-$script:VERSION = 'v3.12'
+$script:VERSION = 'v3.13'
 
 # CommitShort: 从 $PSScriptRoot/../.git/HEAD 读 (本地开发) 或 fallback 到 'unknown'
 # raw 拉 (无 .git) 时返 'unknown'
@@ -849,22 +849,7 @@ function Invoke-PreCheck {
     $fw = Get-NetFirewallRule -DisplayName 'OpenSSH-Server-In-TCP' -ErrorAction SilentlyContinue
     Write-Host (" 防火墙 :22 放行: $(Tern ($null -ne $fw) '✅' '❌ 未加')")
 
-    # 6. 痕迹 (ssh-deploy 关心的)
-    Write-Host ""
-    Write-Info "  痕迹:"
-    $oldFrp = 'C:\Tools\frp'
-    Write-Host ("    C:\Tools\frp (老): $(Tern (Test-Path $oldFrp) '⚠  存在,要清' '✅ 无')")
-    $cfgRead = Read-SshConfig
-    if (-not $cfgRead.ok) {
-        Write-Host "    ~/.ssh/config 段: ❌ 读失败 ($($cfgRead.status): $($cfgRead.err)) — 跳"
-    } else {
-        $cfgRaw = $cfgRead.content
-        Write-Host ("    ~/.ssh/config 段: $(Tern ($cfgRaw -match '# ===== ssh-deploy:') '⚠  存在,要清' '✅ 无')")
-    }
-    $oldTask = Get-ScheduledTask 'frpc-autostart' -ErrorAction SilentlyContinue
-    Write-Host ("    frpc-autostart (老任务): $(Tern $oldTask '⚠  存在,要清' '✅ 无')")
-
-    # 7. VPS 设备 (合并原 Show-Status)
+    # 6. VPS 设备 (合并原 Show-Status)
     Write-Host ""
     Write-Info "  VPS 设备:"
     $devList = Get-VpsDeviceList
