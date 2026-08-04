@@ -14,14 +14,18 @@
                  密码检查变 Critical guard / 错误不再吞 (LastError 持久)
       - 单一源: 1 个 Invoke-VpsApi / 1 个 Get-DeviceIdLocal / 1 个 ssh-config marker
 
+    v3.8 改动 (2026-08-04):
+      - Install 序列 SC S2 S3 S4 S5 R1 SY (7 步, S1+C1 合并 / C2+C3 合并 / R1 提前)
+      - bin 离线装 OpenSSH (windows/bin/openssh/OpenSSH-Win64.zip)
+      - S2 删 backup / S5 改 non-Critical / PreCheck 加 VPS 设备节
+      - 菜单 5 项 (删 Syncthing 协同 + poller 全删)
+
     主菜单:
-      [1] PreCheck             — 6 节体检报告
-      [2] Install              — 默认 mode=both(server+client)
-      [3] VPS 状态 + 同步       — 拉 device list → 重写 ~/.ssh/config + PowerShell alias
-      [4] Register 本机到 VPS  — POST /device/register
-      [5] Unregister 主机       — 从 VPS 列表挑一台注销
-      [6] Uninstall 本机        — 反向操作
-      [7] Syncthing 协同       — 装 + 接共享 + long-poller
+      [1] PreCheck
+      [2] Install              — 默认 mode=both, 自动追加 R1 注册 + SY 同步
+      [3] 同步 VPS 设备          — 拉 device list → 写 ~/.ssh/config + PowerShell alias
+      [4] Unregister 主机       — 从 VPS 列表挑一台注销
+      [5] Uninstall 本机        — 反向操作
       [0] Exit
 
 .PARAMETER VpsHost
@@ -37,7 +41,7 @@
 .PARAMETER ServerName
     VPS 注册名(默认 = $env:COMPUTERNAME 小写)
 .PARAMETER InstallMode
-    'both'(默认)/ 'server' / 'client'
+    保留兼容 (无实际效果, 装就全装)
 .PARAMETER TokenFile
     密钥文档路径(.env 风格 KEY=VALUE)
 
@@ -54,7 +58,7 @@ param(
     [string]$LocalUser = '',
     [int]$FrpSshPort = 0,
     [string]$ServerName,
-    [ValidateSet('both', 'server', 'client')]
+    [ValidateSet('both')]
     [string]$InstallMode = 'both',
     [string]$TokenFile
 )
@@ -67,7 +71,7 @@ $script:startTime = Get-Date
 # ─────────────────────────────────────────────────────────────────────
 #region Module 0 — Constants + Logging
 
-$script:VERSION = 'v3.8'
+$script:VERSION = 'v3.9'
 
 # CommitShort: 从 $PSScriptRoot/../.git/HEAD 读 (本地开发) 或 fallback 到 'unknown'
 # raw 拉 (无 .git) 时返 'unknown'
@@ -95,6 +99,7 @@ $script:DEFAULT_USER = 'wukong'   # 外机默认 (本机主仓用户是 WuKong, 
 
 $script:FrpcInstallDir = 'C:\frp'
 $script:BundledFrpc = Join-Path $PSScriptRoot 'bin\frp\frpc.exe'
+$script:BundledOpenSshZip = Join-Path $PSScriptRoot 'bin\openssh\OpenSSH-Win64.zip'
 $script:RemoteFrpcUrl = 'https://raw.githubusercontent.com/wukong0908/ssh-deploy/main/bin/frp/frpc.exe'
 $script:FrpcMinBytes = 1MB
 
@@ -855,7 +860,21 @@ function Invoke-PreCheck {
     $oldTask = Get-ScheduledTask 'frpc-autostart' -ErrorAction SilentlyContinue
     Write-Host ("    frpc-autostart (老任务): $(Tern $oldTask '⚠  存在,要清' '✅ 无')")
 
-    # 7. 致命错误快照
+    # 7. VPS 设备 (合并原 Show-Status)
+    Write-Host ""
+    Write-Info "  VPS 设备:"
+    $devList = Get-VpsDeviceList
+    if ($devList -and $devList.devices) {
+        foreach ($d in $devList.devices) {
+            $status = if ($d.status) { $d.status } else { 'unknown' }
+            Write-Host "    [$status] $($d.device_name) port=$($d.capabilities.frpc.remote_port) user=$($d.capabilities.sshd.user)"
+        }
+    }
+    else {
+        Write-Host "    (VPS 不可达 / 无设备)"
+    }
+
+    # 8. 致命错误快照
     if ($script:State.LastError) {
         Write-Host ""
         Write-Host "  ⚠ 上次错误: $($script:State.LastError) (at $($script:State.LastErrorAt))"
@@ -864,21 +883,19 @@ function Invoke-PreCheck {
 }
 
 # ─────────────────────────────────────────────────────────────────────
-# Module 2 — Install (表驱动, S1-S5 + C1-C3)
+# Module 2 — Install (表驱动, 7 步 SC S2 S3 S4 S5 R1 SY)
 # ─────────────────────────────────────────────────────────────────────
 #region Module 2 — Install
 
 # 单一源: 8 步定义
 $script:InstallSteps = @(
-    @{ Code = 'S1'; Fn = 'Install-OpenSSHServer'; Needs = @('Admin'); Critical = $true; SkipIn = 'client' }
-    @{ Code = 'S2'; Fn = 'Set-SshdConfig'; Needs = @('Admin'); Critical = $true; SkipIn = 'client' }
-    @{ Code = 'S3'; Fn = 'Add-FirewallRule22'; Needs = @('Admin'); Critical = $true; SkipIn = 'client' }
-    @{ Code = 'S4'; Fn = 'Install-Frpc'; Needs = @('Admin', 'FrpToken'); Critical = $false; SkipIn = 'client' }
-    @{ Code = 'S5'; Fn = 'Test-AccountAndRestartSshd'; Needs = @('Admin'); Critical = $true; SkipIn = 'client' }
-    @{ Code = 'C1'; Fn = 'Install-OpenSSHClient'; Needs = @(); Critical = $true; SkipIn = 'server' }
-    @{ Code = 'C2'; Fn = 'Sync-SshConfigFromVps'; Needs = @('Bearer'); Critical = $false; SkipIn = 'server' }
-    @{ Code = 'C3'; Fn = 'Add-PowerShellAliases'; Needs = @(); Critical = $false; SkipIn = 'server' }
-    @{ Code = 'R1'; Fn = 'Register-ThisHost'; Needs = @('Bearer'); Critical = $false; SkipIn = 'client' }
+    @{ Code = 'SC'; Fn = 'Install-OpenSSH'; Needs = @('Admin'); Critical = $true }
+    @{ Code = 'S2'; Fn = 'Set-SshdConfig'; Needs = @('Admin'); Critical = $true }
+    @{ Code = 'S3'; Fn = 'Add-FirewallRule22'; Needs = @('Admin'); Critical = $true }
+    @{ Code = 'S4'; Fn = 'Install-Frpc'; Needs = @('Admin', 'FrpToken'); Critical = $false }
+    @{ Code = 'S5'; Fn = 'Test-AccountPassword'; Needs = @('Admin'); Critical = $false }
+    @{ Code = 'R1'; Fn = 'Register-ThisHost'; Needs = @('Bearer'); Critical = $false }
+    @{ Code = 'SY'; Fn = 'Sync-VpsDevices'; Needs = @('Bearer'); Critical = $false }
 )
 
 function Get-InstallStep {
@@ -912,11 +929,11 @@ function Invoke-Install {
     .SYNOPSIS
         表驱动跑 8 步. Critical 失败即停, 非 Critical 继续.
     .PARAMETER Mode
-        'both' / 'server' / 'client'
+        保留兼容 (无实际效果, 装就全装)
     #>
     param([string]$Mode = $script:State.InstallMode)
 
-    Write-Info "========== Install (mode=$Mode) =========="
+    Write-Info "========== Install =========="
 
     # 启动 PreCheck (干跑)
     Invoke-PreCheck
@@ -926,10 +943,6 @@ function Invoke-Install {
     }
 
     foreach ($step in $script:InstallSteps) {
-        # 跳过 SkipIn
-        if ($Mode -eq 'server' -and $step.SkipIn -eq 'server') { continue }
-        if ($Mode -eq 'client' -and $step.SkipIn -eq 'client') { continue }
-
         Write-Step $step.Code $step.Fn
         $stepStart = Get-Date
 
@@ -971,124 +984,104 @@ function Invoke-Install {
         }
     }
 
-    Write-Info "========== Install 完成 ($Mode) =========="
+    Write-Info "========== Install 完成 =========="
     return @{ ok = $true }
 }
 
-# ── Step S1: OpenSSH Server ──
-function Install-OpenSSHServer {
+# ── Step SC: OpenSSH Server + Client 一起装 ──
+function Install-OpenSSH {
     <#
-    5 态判定:
-      1. cap.State=Installed → 跳
-      2. cap 返值未装 → Add-WindowsCapability 装
-      3. cap=null + sshd 服务已装 → 跳 (DISM 走不动但 sshd 在)
-      4. cap=null + sshd 未装 + zip 在 → 离线 xcopy + sc create + ssh-keygen -A
-         (绕开 install-sshd.ps1 — 该脚本会触发 '没有注册类' COM 错)
-      5. cap=null + 都没 → 返错
+    合并 S1 + C1. 优先 bin 离线 (绕开 Get-WindowsCapability DISM COMException),
+    fallback 到 capability. Server / Client 装成后, sshd 服务注册 + 自启.
     #>
-    # Note: $ErrorActionPreference='Stop' 全局生效, Get-WindowsCapability 内部 COM 异常
-    #   会冒泡 (SilentlyContinue 不生效). 必须 try/catch 兜 COMException.
-    $cap = $null
-    try {
-        $cap = Get-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 -ErrorAction Stop
-    } catch [System.Runtime.InteropServices.COMException] {
-        Write-Debug "  Get-WindowsCapability COM 异常 (DISM 走不动): $($_.Exception.Message)"
-        $cap = $null
-    } catch {
-        Write-Debug "  Get-WindowsCapability 异常: $($_.Exception.Message)"
-        $cap = $null
-    }
+    # 1. bin 离线优先 — 绕开 DISM COM 错
     $sshdExe = "$env:SystemRoot\System32\OpenSSH\sshd.exe"
-
-    # 1. capability 报已装
-    if ($cap -and $cap.State -eq 'Installed') {
-        Write-Info "  OpenSSH Server 已装 (capability), 跳过"
-    }
-    # 3. capability 拿不到但 sshd 服务在
-    elseif ($null -eq $cap -and (Get-Service sshd -ErrorAction SilentlyContinue)) {
-        Write-Info "  OpenSSH Server 检测不到 capability 但 sshd 服务已存在 — 跳过"
-    }
-    # 5. 啥都没有
-    elseif ($null -eq $cap -and -not (Test-Path $sshdExe) -and -not (Get-Service sshd -ErrorAction SilentlyContinue)) {
-        Write-Warn "  capability 拿不到 + sshd 未装 — 试 zip 离线装"
-        $workDir = Join-Path $env:TEMP 'ssh-deploy-openssh'
-        $zip = Get-OpenSSHZip -WorkDir $workDir
-        if (-not $zip) {
-            return @{ ok = $false; msg = 'capability 不可用 + zip 离线包拿不到' }
-        }
-        $expanded = Expand-OpenSSHZip -ZipPath $zip.path -ExpandRoot $workDir
-        $dest = "$env:SystemRoot\System32\OpenSSH"
-        if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest -Force | Out-Null }
-        # 直接 xcopy binaries (绕开 install-sshd.ps1)
-        try {
-            Copy-Item "$expanded\*" "$dest\" -Recurse -Force -ErrorAction Stop
-            Write-Info "  OpenSSH binaries 已复制到 $dest"
-        } catch {
-            return @{ ok = $false; msg = "binaries 复制失败: $($_.Exception.Message)" }
-        }
-        # ssh-keygen -A 生成 host keys
-        try {
-            & "$dest\ssh-keygen.exe" -A 2>&1 | Out-Null
-        } catch {
-            Write-Warn "  ssh-keygen -A 失败 (host keys 可能未生成): $($_.Exception.Message)"
-        }
-        # sc create sshd
-        try {
-            $scOut = sc.exe create sshd binPath= "`"$dest\sshd.exe`"" DisplayName= "OpenSSH SSH Server" start= auto 2>&1
-            Write-Info "  sc create sshd: $scOut"
-        } catch {
-            Write-Warn "  sc create sshd 失败: $($_.Exception.Message)"
-        }
-        # ProgramData\ssh 目录 + 默认 sshd_config
-        if (-not (Test-Path 'C:\ProgramData\ssh')) {
-            New-Item -ItemType Directory -Path 'C:\ProgramData\ssh' -Force | Out-Null
-        }
-        if ((Test-Path "$expanded\sshd_config_default") -and -not (Test-Path 'C:\ProgramData\ssh\sshd_config')) {
-            Copy-Item "$expanded\sshd_config_default" 'C:\ProgramData\ssh\sshd_config' -Force
-        }
-    }
-    # 2. capability 返值未装 — Add-WindowsCapability
-    elseif ($cap) {
-        try {
-            Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 -ErrorAction Stop | Out-Null
-            Write-Info "  OpenSSH Server 已通过 DISM 装"
-        }
-        catch {
-            Write-Warn "  Add-WindowsCapability 失败: $($_.Exception.Message)"
-            return @{ ok = $false; msg = 'DISM 装失败' }
-        }
-    }
-    # 兜底:上面漏了的情况 — 当已装 (sshd.exe 在)
-    elseif (Test-Path $sshdExe) {
-        Write-Info "  OpenSSH binaries 已在 $sshdExe — 跳过"
+    $sshExe  = "$env:SystemRoot\System32\OpenSSH\ssh.exe"
+    if ((Test-Path $sshdExe) -and (Test-Path $sshExe) -and (Get-Service sshd -ErrorAction SilentlyContinue)) {
+        Write-Info "  OpenSSH Server + Client binaries 已装 — 跳过"
     }
     else {
-        return @{ ok = $false; msg = 'OpenSSH Server 装不上 (capability/binaries 都不可用)' }
+        $workDir = Join-Path $env:TEMP 'ssh-deploy-openssh'
+        $zip = Get-OpenSSHZip -WorkDir $workDir
+        if ($zip) {
+            $expanded = Expand-OpenSSHZip -ZipPath $zip.path -ExpandRoot $workDir
+            $dest = "$env:SystemRoot\System32\OpenSSH"
+            if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest -Force | Out-Null }
+            try {
+                Copy-Item "$expanded\*" "$dest\" -Recurse -Force -ErrorAction Stop
+                Write-Info "  OpenSSH binaries 已复制到 $dest (tier-1 bin)"
+            }
+            catch {
+                Write-Warn "  bin 复制失败: $($_.Exception.Message) — 试 DISM"
+                $zip = $null
+            }
+            if ($zip) {
+                # ssh-keygen -A 生成 host keys
+                try { & "$dest\ssh-keygen.exe" -A 2>&1 | Out-Null } catch {}
+                # sc create sshd (仅当服务不存在)
+                if (-not (Get-Service sshd -ErrorAction SilentlyContinue)) {
+                    try {
+                        sc.exe create sshd binPath= "`"$dest\sshd.exe`"" DisplayName= "OpenSSH SSH Server" start= auto 2>&1 | Out-Null
+                    } catch {
+                        Write-Warn "  sc create sshd 失败: $($_.Exception.Message)"
+                    }
+                }
+                # ProgramData\ssh + 默认 sshd_config
+                if (-not (Test-Path 'C:\ProgramData\ssh')) {
+                    New-Item -ItemType Directory -Path 'C:\ProgramData\ssh' -Force | Out-Null
+                }
+                if ((Test-Path "$expanded\sshd_config_default") -and -not (Test-Path 'C:\ProgramData\ssh\sshd_config')) {
+                    Copy-Item "$expanded\sshd_config_default" 'C:\ProgramData\ssh\sshd_config' -Force
+                }
+            }
+        }
+        else {
+            Write-Warn "  bin 拿不到 — 试 DISM capability"
+        }
+
+        # 2. DISM fallback (仅当 bin 失败或拿不到时)
+        if (-not (Test-Path $sshdExe) -or -not (Test-Path $sshExe)) {
+            foreach ($name in @('OpenSSH.Server~~~~0.0.1.0', 'OpenSSH.Client~~~~0.0.1.0')) {
+                $cap = $null
+                try {
+                    $cap = Get-WindowsCapability -Online -Name $name -ErrorAction Stop
+                } catch [System.Runtime.InteropServices.COMException] {
+                    $cap = $null
+                } catch {
+                    $cap = $null
+                }
+                if ($cap -and $cap.State -ne 'Installed') {
+                    try {
+                        Add-WindowsCapability -Online -Name $name -ErrorAction Stop | Out-Null
+                        Write-Info "  $name 通过 DISM 装"
+                    } catch {
+                        Write-Warn "  $name DISM 装失败: $($_.Exception.Message)"
+                    }
+                }
+            }
+        }
     }
 
-    # 启动 + 设自启 (succeed 路径统一)
+    # 3. 验证 + 启服务
+    $sshdSvc = Get-Service sshd -ErrorAction SilentlyContinue
+    if (-not $sshdSvc) {
+        return @{ ok = $false; msg = 'OpenSSH 装失败 (bin + DISM 都不可用)' }
+    }
     Set-Service sshd -StartupType Automatic -ErrorAction SilentlyContinue
     Start-Service sshd -ErrorAction SilentlyContinue
-    $svc = Get-Service sshd -ErrorAction SilentlyContinue
-    $status = if ($svc) { $svc.Status } else { 'not installed' }
-    Write-Info "  sshd 服务: $status"
-    if ($status -eq 'not installed') {
-        return @{ ok = $false; msg = 'sshd 服务未注册; 装失败' }
-    }
+    Write-Info "  sshd 服务: $($sshdSvc.Status)"
     return @{ ok = $true }
 }
 
 # ── Step S2: sshd_config ──
 function Set-SshdConfig {
     $src = "$env:ProgramData\ssh\sshd_config"
-    $bck = "$src.bak"
     if (-not (Test-Path $src)) {
         Write-Warn "  sshd_config 不存在: $src"
         return @{ ok = $false; msg = 'sshd_config 不存在' }
     }
-    if (-not (Test-Path $bck)) { Copy-Item $src $bck -Force }
 
-    # 替换关键配置
+    # 替换关键配置 (in-memory, 直接 overwrite 不备份)
     $content = Get-Content $src -Raw
     $content = $content -replace '(?m)^#?PasswordAuthentication\s+.*$', 'PasswordAuthentication yes'
     $content = $content -replace '(?m)^#?PubkeyAuthentication\s+.*$', 'PubkeyAuthentication yes'
@@ -1263,32 +1256,33 @@ transport.useCompression = true
 }
 
 # ── Step S5: 账号 + 密码 + sshd restart ──
-function Test-AccountAndRestartSshd {
+function Test-AccountPassword {
+    <#
+    non-Critical: 账号存在 + 有密码. 无密码只 warn, 不阻塞.
+    (Win OpenSSH SAM 缓存, 设密码后下次 SSH 连生效, 不强求 restart)
+    #>
     $user = $script:State.LocalUser
 
-    # 大小写不敏感查找 (外机用户常小写 'wukong' / 主仓用 'WuKong')
     $matched = $null
     try {
         $matched = Get-LocalUser | Where-Object { $_.Name -ieq $user } | Select-Object -First 1
-        if ($matched) {
-            # 把 State.LocalUser 改成系统真实大小写,后续 ssh config 用一致名
-            if ($matched.Name -cne $script:State.LocalUser) {
-                Write-Info "  账号大小写修正: $($script:State.LocalUser) → $($matched.Name)"
-                $script:State.LocalUser = $matched.Name
-            }
-            Write-Info "  账号 $($matched.Name) ✅"
+        if ($matched -and $matched.Name -cne $script:State.LocalUser) {
+            Write-Info "  账号大小写修正: $($script:State.LocalUser) → $($matched.Name)"
+            $script:State.LocalUser = $matched.Name
         }
     }
     catch {}
 
     if (-not $matched) {
-        Write-Err "账号 $user 不存在 (Win 本地用户列表里查不到)" -Critical
+        Write-Warn "  账号 $user 不存在 (Win 本地用户列表里查不到)"
         return @{ ok = $false; msg = '账号不存在' }
     }
 
-    # sshd 重启
-    Restart-Service sshd -Force -ErrorAction Stop
-    Write-Info "  sshd 已重启"
+    if (-not $matched.PasswordRequired) {
+        Write-Warn "  账号 $($matched.Name) 无密码 — SSH 密码认证会失败. 跑 'net user $($matched.Name) *' 设密码"
+        return @{ ok = $true; noPassword = $true }
+    }
+    Write-Info "  账号 $($matched.Name) ✅ 有密码"
     return @{ ok = $true }
 }
 
@@ -1347,8 +1341,12 @@ function Install-OpenSSHClient {
     return @{ ok = $true }
 }
 
-# ── Step C2: 同步 VPS device list → ~/.ssh/config ──
-function Sync-SshConfigFromVps {
+# ── Step SY: 同步 VPS 设备 (config + alias) ──
+function Sync-VpsDevices {
+    <#
+    合并 C2 + C3. 拉 VPS /device/list → 写 ~/.ssh/config wpc-* 段 + PowerShell alias.
+    保留 marker 块, 只换 wpc-* 段, 不动用户其他 Host.
+    #>
     $list = Get-VpsDeviceList
     if (-not $list) {
         Write-Warn "  /device/list 失败 — 跳过 (看 LastApiError)"
@@ -1357,76 +1355,78 @@ function Sync-SshConfigFromVps {
     $devices = $list.devices
     if (-not $devices) { $devices = @() }
 
-    # 写 ~/.ssh/config wpc-* 段
+    # 1. ~/.ssh/config wpc-* 段
     if (-not (Test-Path $script:SshDir)) { New-Item -ItemType Directory -Path $script:SshDir -Force | Out-Null }
     $cfgRead = Read-SshConfig
     if (-not $cfgRead.ok) {
-        Write-Warn "  读 ~/.ssh/config 失败 ($($cfgRead.status): $($cfgRead.err)) — 跳过 (防覆盖用户已有 Host)"
+        Write-Warn "  读 ~/.ssh/config 失败 ($($cfgRead.status): $($cfgRead.err)) — 跳过"
         return @{ ok = $false; msg = 'config 读失败' }
     }
     $cfgRaw = $cfgRead.content
     $cfgRaw = [regex]::Replace($cfgRaw, $script:MarkerConfig, '')
 
-    # 校验每个 device 字段齐 (capabilities.sshd.user + .frpc.remote_port)
+    $cfgBlock = "# ===== ssh-deploy: VPS devices =====`n"
+    $cfgCount = 0
     foreach ($d in $devices) {
         $name = $d.device_name
-        if (-not $name) { Write-Warn "  跳过无 device_name 的设备"; continue }
+        if (-not $name) { continue }
         $usr = $d.capabilities.sshd.user
         $port = $d.capabilities.frpc.remote_port
-        if (-not $usr -or -not $port) {
-            Write-Warn "  跳过 $($name): sshd.user='$usr' frpc.remote_port='$port' 缺字段"
-            continue
-        }
-        $newBlock += "Host wpc-$name`n  HostName $($script:State.VpsHost)`n  Port $port`n  User $usr`n  ServerAliveInterval 30`n  ServerAliveCountMax 3`n`n"
+        if (-not $usr -or -not $port) { continue }
+        $cfgBlock += "Host wpc-$name`n  HostName $($script:State.VpsHost)`n  Port $port`n  User $usr`n  ServerAliveInterval 30`n  ServerAliveCountMax 3`n`n"
+        $cfgCount++
     }
-
-    $newBlock += "# ===== END ssh-deploy =====`n`n"
-    $cfgRaw = $newBlock + $cfgRaw
+    $cfgBlock += "# ===== END ssh-deploy =====`n`n"
+    $cfgRaw = $cfgBlock + $cfgRaw
     $written = Write-SshConfig $cfgRaw
     if (-not $written) {
-        Write-Err "  写 ~/.ssh/config 失败 — 配置未更新" -Critical
-        return @{ ok = $false; msg = 'config 写失败' }
+        Write-Warn "  写 ~/.ssh/config 失败"
     }
-    $count = ($devices | Where-Object {
-        $_.device_name -and $_.capabilities.sshd.user -and $_.capabilities.frpc.remote_port
-    }).Count
-    Write-Info "  ~/.ssh/config 写了 $count 个 wpc-* 段"
-    return @{ ok = $true; count = $count }
-}
+    else {
+        Write-Info "  ~/.ssh/config 写了 $cfgCount 个 wpc-* 段"
+    }
 
-# ── Step C3: PowerShell alias wpc-* ──
-function Add-PowerShellAliases {
-    $list = Get-VpsDeviceList
-    if (-not $list) { return @{ ok = $false; msg = 'no list' } }
-    $devices = $list.devices
-    if (-not $devices) { $devices = @() }
-
+    # 2. PowerShell alias
     $profileFile = $script:ProfilePath
     if (-not (Test-Path $profileFile)) { New-Item -ItemType File -Path $profileFile -Force | Out-Null }
-    $raw = Get-Content $profileFile -Raw -ErrorAction SilentlyContinue
-    if (-not $raw) { $raw = '' }
-    $raw = [regex]::Replace($raw, $script:MarkerAlias, '')
+    $aliasRaw = Get-Content $profileFile -Raw -ErrorAction SilentlyContinue
+    if (-not $aliasRaw) { $aliasRaw = '' }
+    $aliasRaw = [regex]::Replace($aliasRaw, $script:MarkerAlias, '')
 
-    $block = "# ===== ssh-deploy aliases =====`n"
+    $aliasBlock = "# ===== ssh-deploy aliases =====`n"
     foreach ($d in $devices) {
         $name = $d.device_name
-        $block += "Set-Alias -Name wpc-$name -Value ssh -Force`n"
+        if (-not $name) { continue }
+        $aliasBlock += "Set-Alias -Name wpc-$name -Value ssh -Force`n"
     }
-    $block += "# ===== END ssh-deploy aliases =====`n"
-    $raw = $block + "`n" + $raw
-    [System.IO.File]::WriteAllText($profileFile, $raw, [System.Text.UTF8Encoding]::new($false))
+    $aliasBlock += "# ===== END ssh-deploy aliases =====`n"
+    $aliasRaw = $aliasBlock + "`n" + $aliasRaw
+    [System.IO.File]::WriteAllText($profileFile, $aliasRaw, [System.Text.UTF8Encoding]::new($false))
     Write-Info "  $profileFile 写了 $($devices.Count) 个 alias"
-    return @{ ok = $true }
+
+    return @{ ok = $true; count = $cfgCount }
 }
 
 # ── helpers (OpenSSH zip) ──
 function Get-OpenSSHZip {
+    <#
+    3-tier:
+      1. Bundled: $PSScriptRoot\bin\openssh\OpenSSH-Win64.zip
+      2. Cached:  $WorkDir\OpenSSH-Win64.zip
+      3. Network: GitHub raw
+    #>
     param([string]$WorkDir)
     if (-not (Test-Path $WorkDir)) { New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null }
+    # 1. bundled
+    if (Test-Path $script:BundledOpenSshZip -PathType Leaf) {
+        return @{ path = $script:BundledOpenSshZip; source = 'bundled' }
+    }
+    # 2. cached
     $localZip = Join-Path $WorkDir $script:OPENSSH_ZIP_NAME
     if (Test-Path $localZip -PathType Leaf) {
         return @{ path = $localZip; source = 'cached' }
     }
+    # 3. network
     Write-Info "  下载 OpenSSH zip (从 GitHub raw)..."
     try {
         Invoke-WebRequest -Uri $script:OPENSSH_GH_URL -OutFile $localZip -UseBasicParsing -ErrorAction Stop
@@ -1641,70 +1641,14 @@ function Invoke-Uninstall {
 # ─────────────────────────────────────────────────────────────────────
 #region Module 5 — Menu
 
-function Show-Status {
-    <#
-    合并 v2 [1] Show-Status + [3] Switch. 拉 device list + 显示云端 + 本机 + 同步 config/alias.
-    #>
-    Write-Info "========== VPS 状态 =========="
-
-    # 云端
-    $list = Get-VpsDeviceList
-    if ($list) {
-        Write-Info "  云端设备:"
-        if ($list.devices) {
-            foreach ($d in $list.devices) {
-                $port = $d.capabilities.frpc.remote_port
-                $user = $d.capabilities.sshd.user
-                $online = if ($d.online) { 'online' } else { 'offline' }
-                Write-Host "    - $($d.device_name) port $port user $user $online"
-            }
-        }
-        else {
-            Write-Info "    (空)"
-        }
-    }
-    else {
-        Write-Warn "  /device/list 失败: $($script:State.LastApiError)"
-    }
-
-    # 本机
-    Write-Host ""
-    Write-Info "  本机:"
-    $h = Test-FrpcHealth
-    if ($h.Process) {
-        Write-Host ("    frpc:    running PID $($h.ProcId)")
-    } else {
-        Write-Host "    frpc:    stopped"
-    }
-    if ($h.Task) {
-        Write-Host "    frpc-bg: Ready"
-    } else {
-        Write-Host "    frpc-bg: 未注册"
-    }
-    $sshd = Get-Service sshd -ErrorAction SilentlyContinue
-    $sshdStatus = if ($null -ne $sshd) { $sshd.Status } else { 'not installed' }
-    Write-Host (" sshd: $sshdStatus")
-    $conn22 = Get-NetTCPConnection -LocalPort 22 -State Listen -ErrorAction SilentlyContinue
-    Write-Host ("    :22:     $(Tern $conn22 'LISTEN' 'no')")
-
-    # 同步本地 config + alias
-    Write-Host ""
-    Write-Info "  同步本地 config / alias..."
-    $null = Sync-SshConfigFromVps
-    $null = Add-PowerShellAliases
-    Write-Ok "  同步完成 (重启 PowerShell 后 alias 生效)"
-}
-
 function Show-Menu {
     Write-Host ""
     Write-Host "========== ssh-deploy v$($script:VERSION) ==========" -ForegroundColor Cyan
-    Write-Host "  [1] PreCheck              — 7 节体检报告"
-    Write-Host "  [2] Install               — 默认 mode=both (server+client)"
-    Write-Host "  [3] VPS 状态 + 同步        — 拉 device list → 重写 ~/.ssh/config + alias"
-    Write-Host "  [4] Register 本机到 VPS"
-    Write-Host "  [5] Unregister 主机       — 从 VPS 列表挑一台"
-    Write-Host "  [6] Uninstall 本机"
-    Write-Host "  [7] Syncthing 协同        — 装 + 接共享 + long-poller"
+    Write-Host "  [1] PreCheck"
+    Write-Host "  [2] Install"
+    Write-Host "  [3] 同步 VPS 设备"
+    Write-Host "  [4] Unregister 主机"
+    Write-Host "  [5] Uninstall 本机"
     Write-Host "  [0] Exit"
     Write-Host ""
 }
@@ -1716,11 +1660,9 @@ function Invoke-MenuLoop {
         switch ($choice) {
             '1' { Invoke-PreCheck }
             '2' { Invoke-Install -Mode $script:State.InstallMode }
-            '3' { Show-Status }
-            '4' { $null = Register-ThisHost }
-            '5' { $null = Unregister-Host }
-            '6' { Invoke-Uninstall }
-            '7' { Write-Info "使用 ssh-deploy-poller.ps1 (单独脚本, 走菜单 [8] 用 Syncthing 入口)" }
+            '3' { Sync-VpsDevices }
+            '4' { $null = Unregister-Host }
+            '5' { Invoke-Uninstall }
             '0' { Write-Ok "bye"; return }
             default { Write-Warn "未知选项: $choice" }
         }
@@ -1739,7 +1681,7 @@ Write-Host "ssh-deploy v$($script:VERSION) ($script:CommitShort) starting..." -F
 $bearerShort = if ($script:State.BearerToken -and $script:State.BearerToken.Length -gt 0) {
     $script:State.BearerToken.Substring(0, [Math]::Min(8, $script:State.BearerToken.Length))
 } else { '(none)' }
-Write-Host "  VPS: $($script:State.VpsHost)  Mode: $($script:State.InstallMode)  Bearer: $bearerShort..." -ForegroundColor DarkGray
+Write-Host "  VPS: $($script:State.VpsHost)  Bearer: $bearerShort..." -ForegroundColor DarkGray
 
 # Tern 自检 — 抓老版本缓存 (param([bool]$C, ...)) 直接爆错
 try {
