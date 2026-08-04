@@ -75,7 +75,7 @@ $script:startTime = Get-Date
 # ─────────────────────────────────────────────────────────────────────
 #region Module 0 — Constants + Logging
 
-$script:VERSION = 'v3.18'
+$script:VERSION = 'v3.19'
 
 # CommitShort: 从 $PSScriptRoot/../.git/HEAD 读 (本地开发) 或 fallback 到 'unknown'
 # raw 拉 (无 .git) 时返 'unknown'
@@ -1671,12 +1671,37 @@ function Show-Menu {
     Write-Host ""
 }
 
+function Request-InstallParams {
+    <#
+    菜单 [1] Install 入口前集中问 host 名 + frp port
+    主人 2026-08-04: 不放启动时, 放 Install 入口
+    S4 (写 frpc.toml) + R1 (register) 用同值, 避免 v3.18 错位 bug
+    仅未传 param 时问, 自动化直回车走默认
+    #>
+    Write-Host ""
+    Write-Host "  === Install 前确认 ===" -ForegroundColor Cyan
+    if (-not $ServerName) {
+        $defaultName = $script:State.ServerName
+        $input = Read-Host "  host 名 (默认 $defaultName,直回车接受)"
+        if ($input) { $script:State.ServerName = $input.ToLower().Trim() }
+    }
+    if (-not $FrpSshPort) {
+        $defaultPort = $script:State.FrpcPort
+        $inputPort = Read-Host "  frp remote port (默认 $defaultPort,直回车接受)"
+        $parsedPort = 0
+        if ($inputPort -and [int]::TryParse($inputPort, [ref]$parsedPort) -and $parsedPort -gt 0 -and $parsedPort -lt 65536) {
+            $script:State.FrpcPort = $parsedPort
+        }
+    }
+    Write-Host ""
+}
+
 function Invoke-MenuLoop {
     do {
         Show-Menu
         $choice = Read-Host "选"
         switch ($choice) {
-            '1' { Invoke-Install -Mode $script:State.InstallMode }
+            '1' { Request-InstallParams; Invoke-Install -Mode $script:State.InstallMode }
             '2' { $null = Sync-VpsDevices }
             '3' { $null = Unregister-Host }
             '4' { Invoke-Uninstall }
@@ -1713,26 +1738,8 @@ try {
     throw
 }
 
-# 启动最前面: host 名 + frp port 集中 prompt (主人 2026-08-04: 放最前面, S4/R1 都用同一值)
-# 仅当没显式 param 时才问, 自动化脚本 (irm|iex) 直回车走默认
-if (-not $ServerName -or -not $FrpSshPort) {
-    Write-Host ""
-    Write-Host "  === 主机标识 / 端口 ===" -ForegroundColor Cyan
-    if (-not $ServerName) {
-        $defaultName = $script:State.ServerName
-        $input = Read-Host "  host 名 (默认 $defaultName,直回车接受)"
-        if ($input) { $script:State.ServerName = $input.ToLower().Trim() }
-    }
-    if (-not $FrpSshPort) {
-        $defaultPort = $script:State.FrpcPort
-        $inputPort = Read-Host "  frp remote port (默认 $defaultPort,直回车接受)"
-        $parsedPort = 0
-        if ($inputPort -and [int]::TryParse($inputPort, [ref]$parsedPort) -and $parsedPort -gt 0 -and $parsedPort -lt 65536) {
-            $script:State.FrpcPort = $parsedPort
-        }
-    }
-    Write-Host ""
-}
+# 启动最前面: host 名 + frp port 集中 prompt (主人 2026-08-04: 移到菜单 [1] Install 入口, 不放启动时)
+# — 此处 prompt 删掉, 见 Show-Menu [1] case
 
 # 启动自动 PreCheck (主人 2026-08-04 要求 — 不再单独菜单跑)
 Invoke-PreCheck
