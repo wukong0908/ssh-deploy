@@ -67,7 +67,7 @@ $script:startTime = Get-Date
 # ─────────────────────────────────────────────────────────────────────
 #region Module 0 — Constants + Logging
 
-$script:VERSION = 'v3.1'
+$script:VERSION = 'v3.2'
 
 # CommitShort: 从 $PSScriptRoot/../.git/HEAD 读 (本地开发) 或 fallback 到 'unknown'
 # raw 拉 (无 .git) 时返 'unknown'
@@ -91,7 +91,7 @@ try {
 
 $script:DEFAULT_VPS = '8.163.106.31'
 $script:DEFAULT_PORT = 6000
-$script:DEFAULT_USER = 'WuKong'
+$script:DEFAULT_USER = 'wukong'   # 外机默认 (本机主仓用户是 WuKong, 外机常见小写)
 
 $script:FrpcInstallDir = 'C:\frp'
 $script:BundledFrpc = Join-Path $PSScriptRoot 'bin\frp\frpc.exe'
@@ -727,14 +727,16 @@ function Invoke-PreCheck {
     }
     catch { Write-Host "  OS: (查不到)" }
 
-    # 2. 账号 (密码检查已删除 — 主人 2026-08-04 要求)
+    # 2. 账号 (大小写不敏感查找; 密码检查已删除 — 主人 2026-08-04 要求)
     $user = $script:State.LocalUser
+    $matched = $null
     try {
-        $u = Get-LocalUser -Name $user -ErrorAction Stop
-        Write-Host "  账号 ${user}: ✅ 存在"
-    }
-    catch {
-        Write-Host "  账号 ${user}: (不是本地用户,可能 AD)"
+        $matched = Get-LocalUser | Where-Object { $_.Name -ieq $user } | Select-Object -First 1
+    } catch {}
+    if ($matched) {
+        Write-Host "  账号 $($matched.Name): ✅ 存在"
+    } else {
+        Write-Host "  账号 ${user}: ❌ 不存在 (本地用户列表里查不到)"
     }
 
     # 3. 网络 egress 到 VPS
@@ -1229,13 +1231,23 @@ transport.useCompression = true
 function Test-AccountAndRestartSshd {
     $user = $script:State.LocalUser
 
-    # 检查账号存在 (密码检查已删除 — 主人 2026-08-04 要求)
+    # 大小写不敏感查找 (外机用户常小写 'wukong' / 主仓用 'WuKong')
+    $matched = $null
     try {
-        $u = Get-LocalUser -Name $user -ErrorAction Stop
-        Write-Info "  账号 $user ✅"
+        $matched = Get-LocalUser | Where-Object { $_.Name -ieq $user } | Select-Object -First 1
+        if ($matched) {
+            # 把 State.LocalUser 改成系统真实大小写,后续 ssh config 用一致名
+            if ($matched.Name -cne $script:State.LocalUser) {
+                Write-Info "  账号大小写修正: $($script:State.LocalUser) → $($matched.Name)"
+                $script:State.LocalUser = $matched.Name
+            }
+            Write-Info "  账号 $($matched.Name) ✅"
+        }
     }
-    catch {
-        Write-Err "账号 $user 不存在" -Critical
+    catch {}
+
+    if (-not $matched) {
+        Write-Err "账号 $user 不存在 (Win 本地用户列表里查不到)" -Critical
         return @{ ok = $false; msg = '账号不存在' }
     }
 
