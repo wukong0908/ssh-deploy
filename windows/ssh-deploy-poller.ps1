@@ -184,12 +184,12 @@ function Restart-Syncthing {
 # ---------- main loop ----------
 $token = Get-BearerToken
 if (-not $token) {
-    Write-Host "❌ 没找到 BEARER_TOKEN 在 $tokenCache" -ForegroundColor Red
+    Write-Host "[ERR] 没找到 BEARER_TOKEN 在 $tokenCache" -ForegroundColor Red
     exit 1
 }
 $selfId = Get-DeviceId
 if (-not $selfId) {
-    Write-Host "❌ Syncthing 未装 / config.xml 不存在" -ForegroundColor Red
+    Write-Host "[ERR] Syncthing 未装 / config.xml 不存在" -ForegroundColor Red
     exit 1
 }
 
@@ -207,7 +207,7 @@ while ($true) {
         } catch { Write-Host "[poller] 心跳失败:$($_.Exception.Message)" -ForegroundColor Yellow }
 
         # 长轮询变更
-        $url = "http://${defaultVps}:8081/device/changes?since=$($state.last_ts)&wait=30"
+        $url = "http://${defaultVps}:8081/device/changes?since=$($state.last_ts)`&wait=30"
         $resp = Invoke-RestMethod -Uri $url -Headers @{ Authorization = "Bearer $token" } `
             -TimeoutSec 40 -ErrorAction Stop
 
