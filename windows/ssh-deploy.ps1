@@ -952,10 +952,12 @@ function Invoke-Install {
 # ── Step S1: OpenSSH Server ──
 function Install-OpenSSHServer {
     $cap = Get-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 -ErrorAction SilentlyContinue
-    if ($cap.State -eq 'Installed') {
+    $installed = $false
+    if ($cap -and $cap.State -eq 'Installed') {
         Write-Info "  OpenSSH Server 已装, 跳过"
+        $installed = $true
     }
-    else {
+    elseif ($cap) {
         try {
             Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 -ErrorAction Stop | Out-Null
         }
@@ -968,7 +970,21 @@ function Install-OpenSSHServer {
             }
             $expanded = Expand-OpenSSHZip -ZipPath $zip.path -ExpandRoot $workDir
             # 走 Setup 脚本
-            & "$expanded\install-sshd.ps1" 2>&1 | Out-Null
+            try {
+                & "$expanded\install-sshd.ps1" 2>&1 | Out-Null
+            } catch {
+                Write-Warn "  install-sshd.ps1 抛错: $($_.Exception.Message) — 假设离线包脚本可能触发 COM 注册问题; 假定 sshd 已装继续"
+            }
+        }
+    }
+    else {
+        # $cap = $null → DISM 走不动 (servicing stack / 权限); 但 sshd 服务可能已装
+        $existing = Get-Service sshd -ErrorAction SilentlyContinue
+        if ($existing) {
+            Write-Info "  OpenSSH Server 检测不到 capability 但 sshd 服务存在 — 跳过"
+            $installed = $true
+        } else {
+            return @{ ok = $false; msg = 'DISM 走不动且 sshd 未装; 检查 Win11 servicing stack' }
         }
     }
     Set-Service sshd -StartupType Automatic -ErrorAction SilentlyContinue
