@@ -67,7 +67,7 @@ $script:startTime = Get-Date
 # ─────────────────────────────────────────────────────────────────────
 #region Module 0 — Constants + Logging
 
-$script:VERSION = 'v3.4'
+$script:VERSION = 'v3.5'
 
 # CommitShort: 从 $PSScriptRoot/../.git/HEAD 读 (本地开发) 或 fallback 到 'unknown'
 # raw 拉 (无 .git) 时返 'unknown'
@@ -1273,21 +1273,55 @@ function Test-AccountAndRestartSshd {
 
 # ── Step C1: OpenSSH Client ──
 function Install-OpenSSHClient {
-    $cap = Get-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0 -ErrorAction SilentlyContinue
-    if ($cap.State -eq 'Installed') {
-        Write-Info "  OpenSSH Client 已装"
+    # 同 S1: $ErrorActionPreference='Stop' 覆盖 SilentlyContinue, 必须 try/catch COMException
+    $cap = $null
+    try {
+        $cap = Get-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0 -ErrorAction Stop
+    } catch [System.Runtime.InteropServices.COMException] {
+        Write-Debug "  Get-WindowsCapability (Client) COM 异常: $($_.Exception.Message)"
+        $cap = $null
+    } catch {
+        Write-Debug "  Get-WindowsCapability (Client) 异常: $($_.Exception.Message)"
+        $cap = $null
+    }
+    $sshExe = "$env:SystemRoot\System32\OpenSSH\ssh.exe"
+    # 已装
+    if ($cap -and $cap.State -eq 'Installed') {
+        Write-Info "  OpenSSH Client 已装 (capability), 跳过"
         return @{ ok = $true }
     }
-    try {
-        Add-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0 -ErrorAction Stop | Out-Null
+    # cap null + ssh.exe 已装 → 跳
+    elseif ($null -eq $cap -and (Test-Path $sshExe)) {
+        Write-Info "  OpenSSH Client 检测不到 capability 但 ssh.exe 已存在 — 跳过"
+        return @{ ok = $true }
     }
-    catch {
-        Write-Warn "  Add-WindowsCapability 失败: $($_.Exception.Message) — 试离线包"
+    # cap 返值未装 → DISM
+    elseif ($cap) {
+        try {
+            Add-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0 -ErrorAction Stop | Out-Null
+            Write-Info "  OpenSSH Client 已通过 DISM 装"
+        }
+        catch {
+            Write-Warn "  Add-WindowsCapability (Client) 失败: $($_.Exception.Message)"
+            return @{ ok = $false; msg = 'DISM 装 Client 失败' }
+        }
+    }
+    # 兜底离线装 (绕开 install-sshl.ps1 同样 COM 错)
+    else {
         $workDir = Join-Path $env:TEMP 'ssh-deploy-openssh'
         $zip = Get-OpenSSHZip -WorkDir $workDir
-        if (-not $zip) { return @{ ok = $false; msg = '离线包拿不到' } }
+        if (-not $zip) {
+            return @{ ok = $false; msg = 'capability 不可用 + 离线包拿不到' }
+        }
         $expanded = Expand-OpenSSHZip -ZipPath $zip.path -ExpandRoot $workDir
-        & "$expanded\install-sshl.ps1" 2>&1 | Out-Null
+        $dest = "$env:SystemRoot\System32\OpenSSH"
+        if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest -Force | Out-Null }
+        try {
+            Copy-Item "$expanded\*" "$dest\" -Recurse -Force -ErrorAction Stop
+            Write-Info "  OpenSSH Client binaries 已复制到 $dest"
+        } catch {
+            return @{ ok = $false; msg = "Client binaries 复制失败: $($_.Exception.Message)" }
+        }
     }
     return @{ ok = $true }
 }
