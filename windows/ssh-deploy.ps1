@@ -20,12 +20,16 @@
       - S2 删 backup / S5 改 non-Critical / PreCheck 加 VPS 设备节
       - 菜单 5 项 (删 Syncthing 协同 + poller 全删)
 
+    v3.10 改动 (2026-08-04):
+      - Register-ThisHost 加 host 名 prompt
+      - Uninstall 保留 C:\frp\ 文件 (只杀进程 + 删任务)
+      - 启动自动 PreCheck, 菜单 4 项 (删 PreCheck 单独跑)
+
     主菜单:
-      [1] PreCheck
-      [2] Install              — 默认 mode=both, 自动追加 R1 注册 + SY 同步
-      [3] 同步 VPS 设备          — 拉 device list → 写 ~/.ssh/config + PowerShell alias
-      [4] Unregister 主机       — 从 VPS 列表挑一台注销
-      [5] Uninstall 本机        — 反向操作
+      [1] Install              — 默认 mode=both, 启动 PreCheck 自动跑 + R1 注册 + SY 同步
+      [2] 同步 VPS 设备          — 拉 device list → 写 ~/.ssh/config + PowerShell alias
+      [3] Unregister 主机       — 从 VPS 列表挑一台注销
+      [4] Uninstall 本机        — 反向操作 (保留 C:\frp\)
       [0] Exit
 
 .PARAMETER VpsHost
@@ -71,7 +75,7 @@ $script:startTime = Get-Date
 # ─────────────────────────────────────────────────────────────────────
 #region Module 0 — Constants + Logging
 
-$script:VERSION = 'v3.10'
+$script:VERSION = 'v3.11'
 
 # CommitShort: 从 $PSScriptRoot/../.git/HEAD 读 (本地开发) 或 fallback 到 'unknown'
 # raw 拉 (无 .git) 时返 'unknown'
@@ -1647,11 +1651,10 @@ function Invoke-Uninstall {
 function Show-Menu {
     Write-Host ""
     Write-Host "========== ssh-deploy v$($script:VERSION) ==========" -ForegroundColor Cyan
-    Write-Host "  [1] PreCheck"
-    Write-Host "  [2] Install"
-    Write-Host "  [3] 同步 VPS 设备"
-    Write-Host "  [4] Unregister 主机"
-    Write-Host "  [5] Uninstall 本机"
+    Write-Host "  [1] Install"
+    Write-Host "  [2] 同步 VPS 设备"
+    Write-Host "  [3] Unregister 主机"
+    Write-Host "  [4] Uninstall 本机"
     Write-Host "  [0] Exit"
     Write-Host ""
 }
@@ -1661,11 +1664,10 @@ function Invoke-MenuLoop {
         Show-Menu
         $choice = Read-Host "选"
         switch ($choice) {
-            '1' { Invoke-PreCheck }
-            '2' { Invoke-Install -Mode $script:State.InstallMode }
-            '3' { Sync-VpsDevices }
-            '4' { $null = Unregister-Host }
-            '5' { Invoke-Uninstall }
+            '1' { Invoke-Install -Mode $script:State.InstallMode }
+            '2' { Sync-VpsDevices }
+            '3' { $null = Unregister-Host }
+            '4' { Invoke-Uninstall }
             '0' { Write-Ok "bye"; return }
             default { Write-Warn "未知选项: $choice" }
         }
@@ -1698,6 +1700,9 @@ try {
     Write-Host "        当前 commit 应为 $script:CommitShort" -ForegroundColor Red
     throw
 }
+
+# 启动自动 PreCheck (主人 2026-08-04 要求 — 不再单独菜单跑)
+Invoke-PreCheck
 
 # entry dispatch
 if ($MyInvocation.ExpectingInput) {
