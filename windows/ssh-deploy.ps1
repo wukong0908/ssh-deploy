@@ -67,7 +67,7 @@ $script:startTime = Get-Date
 # ─────────────────────────────────────────────────────────────────────
 #region Module 0 — Constants + Logging
 
-$script:VERSION = 'v3.6'
+$script:VERSION = 'v3.7'
 
 # CommitShort: 从 $PSScriptRoot/../.git/HEAD 读 (本地开发) 或 fallback 到 'unknown'
 # raw 拉 (无 .git) 时返 'unknown'
@@ -873,6 +873,7 @@ $script:InstallSteps = @(
     @{ Code = 'C1'; Fn = 'Install-OpenSSHClient'; Needs = @(); Critical = $true; SkipIn = 'server' }
     @{ Code = 'C2'; Fn = 'Sync-SshConfigFromVps'; Needs = @('Bearer'); Critical = $false; SkipIn = 'server' }
     @{ Code = 'C3'; Fn = 'Add-PowerShellAliases'; Needs = @(); Critical = $false; SkipIn = 'server' }
+    @{ Code = 'R1'; Fn = 'Register-ThisHost'; Needs = @('Bearer'); Critical = $false; SkipIn = 'client' }
 )
 
 function Get-InstallStep {
@@ -1489,7 +1490,7 @@ function Register-ThisHost {
         }
     }
     $resp = Invoke-VpsApi -Method POST -Path '/device/register' -Body $body
-    if ($resp) {
+    if ($resp -and ($resp.PSObject.Properties.Name -contains 'device_id' -or $resp.PSObject.Properties.Name -contains 'auth_token')) {
         Write-Ok "  注册成功: $($script:State.ServerName) (port $($script:State.FrpcPort))"
         if ($resp.auth_token) {
             Write-Info "  auth_token: $($resp.auth_token)"
