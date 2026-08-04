@@ -67,7 +67,7 @@ $script:startTime = Get-Date
 # ─────────────────────────────────────────────────────────────────────
 #region Module 0 — Constants + Logging
 
-$script:VERSION = 'v3.5'
+$script:VERSION = 'v3.6'
 
 # CommitShort: 从 $PSScriptRoot/../.git/HEAD 读 (本地开发) 或 fallback 到 'unknown'
 # raw 拉 (无 .git) 时返 'unknown'
@@ -293,15 +293,68 @@ function Unlock-SshFile {
     param([string]$Path)
     if (-not (Test-Path $Path)) { return $true }
     $ok = $true
-    try { Set-ItemProperty -Path $Path -Name IsReadOnly -Value $false -ErrorAction Stop } catch {
-        Write-Warn "  清 IsReadOnly 失败: $($_.Exception.Message)"
-        $ok = $false
-    }
+    # 清 ReadOnly attr: PowerShell Set-ItemProperty 在 ACL 紧时抛, 用 attrib -R 兜底
+    try { attrib.exe -R "$Path" 2>&1 | Out-Null } catch {}
+    try { Set-ItemProperty -Path $Path -Name IsReadOnly -Value $false -ErrorAction Stop } catch {}
     $me = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-    try { icacls $Path /grant:r "${me}:(M)" 2>&1 | Out-Null } catch {
+    try { icacls $Path /grant:r "${me}:(F)" 2>&1 | Out-Null } catch {
         Write-Warn "  icacls grant 失败: $($_.Exception.Message)"
         $ok = $false
     }
+    return $ok
+}
+
+# ── ~/.ssh 整目录解锁 — 防 known_hosts 空 ACL / 跨机 SID 不匹配 / UNKNOWN SID ──
+function Unlock-SshDir {
+    <#
+    解锁 ~/.ssh 整目录, 含:
+      - 目录本身 + owner + 继承清空 + 当前用户/SYSTEM FullControl
+      - 所有文件 (config / known_hosts / authorized_keys) 同样
+      - 清 UNKNOWN SIDs (跨机写产生的脏 ACE)
+    返 [bool]: 全部成功 true, 任意步失败 false
+    #>
+    param([string]$Dir = (Join-Path $env:USERPROFILE '.ssh'))
+    if (-not (Test-Path $Dir)) {
+        New-Item -ItemType Directory -Path $Dir -Force | Out-Null
+    }
+    $ok = $true
+    $me = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+
+    # 清 UNKNOWN SIDs (跨机 SID 残留, ssh 会报 Permission denied)
+    # 直接扫 icacls 输出, 避免 .NET reflection 跨 PowerShell 版本踩坑
+    try {
+        $icaclsOut = & icacls.exe $Dir 2>&1 | Out-String
+        # 匹配形如 "S-1-5-21-...-1003:(F)" 的行
+        $sidPattern = '(S-1-5-\d+(?:-\d+)+(?:\-\d+)?):\([A-Z]+\)'
+        $matches_found = [regex]::Matches($icaclsOut, $sidPattern)
+        foreach ($m in $matches_found) {
+            try { icacls $Dir /remove $m.Groups[1].Value 2>&1 | Out-Null } catch {}
+        }
+    } catch { Write-Warn "  清 UNKNOWN SID 跳过: $($_.Exception.Message)" }
+
+    # 目录 owner + ACL
+    try {
+        icacls $Dir /inheritance:r /grant:r "${me}:(F)" "SYSTEM:(F)" 2>&1 | Out-Null
+        icacls $Dir /setowner "$me" 2>&1 | Out-Null
+    } catch {
+        Write-Warn "  ~/.ssh 目录 ACL 失败: $($_.Exception.Message)"
+        $ok = $false
+    }
+
+    # 遍历所有文件
+    foreach ($f in (Get-ChildItem -Path $Dir -File -Force -ErrorAction SilentlyContinue)) {
+        if (-not (Unlock-SshFile $f.FullName)) { $ok = $false }
+        # UNKNOWN SID 也清文件级
+        try {
+            $icaclsOut = & icacls.exe $f.FullName 2>&1 | Out-String
+            $sidPattern = '(S-1-5-\d+(?:-\d+)+(?:\-\d+)?):\([A-Z]+\)'
+            $matches_found = [regex]::Matches($icaclsOut, $sidPattern)
+            foreach ($m in $matches_found) {
+                try { icacls $f.FullName /remove $m.Groups[1].Value 2>&1 | Out-Null } catch {}
+            }
+        } catch {}
+    }
+
     return $ok
 }
 
@@ -316,7 +369,7 @@ function Read-SshConfig {
     if (-not (Test-Path $script:SshCfg)) {
         return @{ ok = $true; content = ''; status = 'missing'; err = '' }
     }
-    $unlockOk = Unlock-SshFile $script:SshCfg
+    $unlockOk = Unlock-SshDir (Split-Path $script:SshCfg -Parent)
     if (-not $unlockOk) {
         return @{ ok = $false; content = $null; status = 'unlock-failed'; err = 'ACL 解锁失败' }
     }
@@ -336,16 +389,20 @@ function Write-SshConfig {
     失败时输出 Write-Warn (含原因)
     #>
     param([string]$Content)
-    $unlockOk = Unlock-SshFile $script:SshCfg
+    $unlockOk = Unlock-SshDir (Split-Path $script:SshCfg -Parent)
     if (-not $unlockOk) {
         Write-Warn "写 ~/.ssh/config 跳过: ACL 解锁失败"
         return $false
     }
+    # 清 Hidden / ReadOnly attr (OpenSSH 装时会加 Hidden)
+    try { attrib.exe -R -H "$script:SshCfg" 2>&1 | Out-Null } catch {}
     try {
-        [System.IO.File]::WriteAllText($script:SshCfg, $Content, [System.Text.UTF8Encoding]::new($false))
+        # 先写临时文件再 Move, 绕开 AV 实时锁 (Defender/Avast 常锁 .ssh/config)
+        $tmp = "$script:SshCfg.new"
+        [System.IO.File]::WriteAllText($tmp, $Content, (New-Object System.Text.UTF8Encoding $false))
+        Move-Item -Path $tmp -Destination $script:SshCfg -Force -ErrorAction Stop
         return $true
-    }
-    catch {
+    } catch {
         Write-Warn "写 ~/.ssh/config 失败: $($_.Exception.Message)"
         return $false
     }
