@@ -75,7 +75,7 @@ $script:startTime = Get-Date
 # ─────────────────────────────────────────────────────────────────────
 #region Module 0 — Constants + Logging
 
-$script:VERSION = 'v3.17'
+$script:VERSION = 'v3.18'
 
 # CommitShort: 从 $PSScriptRoot/../.git/HEAD 读 (本地开发) 或 fallback 到 'unknown'
 # raw 拉 (无 .git) 时返 'unknown'
@@ -238,20 +238,8 @@ function Initialize-State {
     $script:State.InstallMode = $InstallMode
 
     # 无显式 param 时 prompt 主人确认/改写 server name + frp remote port
-    if (-not $ServerName -and -not $FrpSshPort -and $MyInvocation.ExpectingInput) {
-        Write-Host ""
-        Write-Host "  === 主机标识 / 端口 ===" -ForegroundColor Cyan
-        $defaultName = $script:State.ServerName
-        $input = Read-Host "  server name (默认 $defaultName,直接回车接受)"
-        if ($input) { $script:State.ServerName = $input.ToLower() }
-        $defaultPort = $script:State.FrpcPort
-        $inputPort = Read-Host "  frp remote port (默认 $defaultPort,直接回车接受)"
-        $parsedPort = 0
-        if ($inputPort -and [int]::TryParse($inputPort, [ref]$parsedPort) -and $parsedPort -gt 0) {
-            $script:State.FrpcPort = $parsedPort
-        }
-        Write-Host ""
-    }
+    # (主人 2026-08-04: 这块提示移到 Entry 启动时, S4/R1 都用同一值)
+    # — 此处保留 param 灌入, prompt 改到 Entry 里
 
     # Token: param > secrets file > 首次 prompt
     if ($BearerToken) {
@@ -1479,15 +1467,8 @@ function Expand-OpenSSHZip {
 function Register-ThisHost {
     <#
     POST /device/register. 替 v2 2 个 Register (Install 自动 + Register-DeviceToVPS).
+    host 名 + frp port 在启动时 (Entry) 已 prompt 主人, S4 + R1 都用同一值.
     #>
-    # 注册前确认 host 名 (默认 ServerName, 直回车接受)
-    $defaultName = $script:State.ServerName
-    $input = Read-Host "  host 名 (默认 $defaultName,直回车接受)"
-    if ($input) {
-        $script:State.ServerName = $input.ToLower().Trim()
-        Write-Info "  host 名改为: $($script:State.ServerName)"
-    }
-
     $deviceId = Get-DeviceIdLocal
     # VPS _safe_device_id regex = [A-Za-z0-9._:-]{1,128}
     # 旧 config.xml 可能多 device id 残留 / 拼字符串, 必须单值合法
@@ -1498,15 +1479,6 @@ function Register-ThisHost {
 
     # 查冲突 (主人 2026-08-04: device_name 覆盖静默, remote_port 冲突 prompt 确认)
     $force = $false
-
-    # 注册前确认 frp remote port (默认 6000, 直回车接受)
-    $defaultPort = $script:State.FrpcPort
-    $inputPort = Read-Host "  frp remote port (默认 $defaultPort,直回车接受)"
-    $parsedPort = 0
-    if ($inputPort -and [int]::TryParse($inputPort, [ref]$parsedPort) -and $parsedPort -gt 0 -and $parsedPort -lt 65536) {
-        $script:State.FrpcPort = $parsedPort
-        Write-Info "  frp port 改为: $($script:State.FrpcPort)"
-    }
 
     $list = Invoke-VpsApi -Method GET -Path '/device/list'
     if ($list -and $list.devices) {
@@ -1739,6 +1711,27 @@ try {
     Write-Host "        修法: Remove-Item '$TEMP\ssh-deploy.ps1' -Force; 重新拉 + 跑" -ForegroundColor Red
     Write-Host "        当前 commit 应为 $script:CommitShort" -ForegroundColor Red
     throw
+}
+
+# 启动最前面: host 名 + frp port 集中 prompt (主人 2026-08-04: 放最前面, S4/R1 都用同一值)
+# 仅当没显式 param 时才问, 自动化脚本 (irm|iex) 直回车走默认
+if (-not $ServerName -or -not $FrpSshPort) {
+    Write-Host ""
+    Write-Host "  === 主机标识 / 端口 ===" -ForegroundColor Cyan
+    if (-not $ServerName) {
+        $defaultName = $script:State.ServerName
+        $input = Read-Host "  host 名 (默认 $defaultName,直回车接受)"
+        if ($input) { $script:State.ServerName = $input.ToLower().Trim() }
+    }
+    if (-not $FrpSshPort) {
+        $defaultPort = $script:State.FrpcPort
+        $inputPort = Read-Host "  frp remote port (默认 $defaultPort,直回车接受)"
+        $parsedPort = 0
+        if ($inputPort -and [int]::TryParse($inputPort, [ref]$parsedPort) -and $parsedPort -gt 0 -and $parsedPort -lt 65536) {
+            $script:State.FrpcPort = $parsedPort
+        }
+    }
+    Write-Host ""
 }
 
 # 启动自动 PreCheck (主人 2026-08-04 要求 — 不再单独菜单跑)
