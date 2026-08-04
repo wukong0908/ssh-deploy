@@ -68,7 +68,26 @@ $script:startTime = Get-Date
 #region Module 0 — Constants + Logging
 
 $script:VERSION = 'v3.0'
-$script:CommitShort = 'b8c4f29'   # 同步手动 — raw 拉的时候验
+
+# CommitShort: 从 $PSScriptRoot/../.git/HEAD 读 (本地开发) 或 fallback 到 'unknown'
+# raw 拉 (无 .git) 时返 'unknown'
+$script:CommitShort = 'unknown'
+try {
+    $gitHead = Join-Path (Split-Path $PSScriptRoot -Parent) '.git\HEAD'
+    if (Test-Path $gitHead) {
+        $ref = Get-Content $gitHead -ErrorAction Stop | Select-Object -First 1
+        if ($ref -match '^ref:\s+refs/heads/(.+)$') {
+            $branchRefFile = Join-Path (Split-Path $gitHead -Parent) "refs\heads\$($Matches[1])"
+            if (Test-Path $branchRefFile) {
+                $hash = (Get-Content $branchRefFile -ErrorAction Stop).Trim()
+                if ($hash.Length -ge 7) { $script:CommitShort = $hash.Substring(0, 7) }
+            }
+        }
+        elseif ($ref -match '^[0-9a-f]{7,}') {
+            $script:CommitShort = $ref.Substring(0, 7)
+        }
+    }
+} catch { }
 
 $script:DEFAULT_VPS = '8.163.106.31'
 $script:DEFAULT_PORT = 6000
@@ -218,8 +237,9 @@ function Initialize-State {
         if ($input) { $script:State.ServerName = $input.ToLower() }
         $defaultPort = $script:State.FrpcPort
         $inputPort = Read-Host "  frp remote port (默认 $defaultPort,直接回车接受)"
-        if ($inputPort -and [int]::TryParse($inputPort, [ref]([int]0)) -and [int]$inputPort -gt 0) {
-            $script:State.FrpcPort = [int]$inputPort
+        $parsedPort = 0
+        if ($inputPort -and [int]::TryParse($inputPort, [ref]$parsedPort) -and $parsedPort -gt 0) {
+            $script:State.FrpcPort = $parsedPort
         }
         Write-Host ""
     }
@@ -271,30 +291,63 @@ function Initialize-TokenCache {
 # ── ~/.ssh ACL helper — 解锁读 / 写 (OpenSSH 装时收紧 ACL, 当前 admin 默认无 R/W) ──
 function Unlock-SshFile {
     param([string]$Path)
-    if (-not (Test-Path $Path)) { return }
-    try { Set-ItemProperty -Path $Path -Name IsReadOnly -Value $false -ErrorAction Stop } catch {}
+    if (-not (Test-Path $Path)) { return $true }
+    $ok = $true
+    try { Set-ItemProperty -Path $Path -Name IsReadOnly -Value $false -ErrorAction Stop } catch {
+        Write-Warn "  清 IsReadOnly 失败: $($_.Exception.Message)"
+        $ok = $false
+    }
     $me = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-    try { icacls $Path /grant:r "${me}:(M)" 2>&1 | Out-Null } catch {}
+    try { icacls $Path /grant:r "${me}:(M)" 2>&1 | Out-Null } catch {
+        Write-Warn "  icacls grant 失败: $($_.Exception.Message)"
+        $ok = $false
+    }
+    return $ok
 }
 
 function Read-SshConfig {
-    if (-not (Test-Path $script:SshCfg)) { return '' }
-    Unlock-SshFile $script:SshCfg
+    <#
+    返 hashtable: @{ ok=$true; content=''; status='missing'|'ok'|'unreadable'; err='' }
+      missing    → 文件不存在, content='', ok=$true (允许)
+      ok         → 读取成功, content=raw, ok=$true
+      unreadable → 文件存在但读失败 (锁/ACL/AV), content=$null, ok=$false
+                  调用方必须 bail 不能当作空文件覆写 (会清掉用户配置)
+    #>
+    if (-not (Test-Path $script:SshCfg)) {
+        return @{ ok = $true; content = ''; status = 'missing'; err = '' }
+    }
+    $unlockOk = Unlock-SshFile $script:SshCfg
+    if (-not $unlockOk) {
+        return @{ ok = $false; content = $null; status = 'unlock-failed'; err = 'ACL 解锁失败' }
+    }
     try {
-        return Get-Content $script:SshCfg -Raw -ErrorAction Stop
-    } catch {
+        $raw = Get-Content $script:SshCfg -Raw -ErrorAction Stop
+        return @{ ok = $true; content = $raw; status = 'ok'; err = '' }
+    }
+    catch {
         Write-Warn "读 ~/.ssh/config 失败: $($_.Exception.Message)"
-        return ''
+        return @{ ok = $false; content = $null; status = 'unreadable'; err = $_.Exception.Message }
     }
 }
 
 function Write-SshConfig {
+    <#
+    返 [bool]: 写成功 true, 失败 false
+    失败时输出 Write-Warn (含原因)
+    #>
     param([string]$Content)
-    Unlock-SshFile $script:SshCfg
+    $unlockOk = Unlock-SshFile $script:SshCfg
+    if (-not $unlockOk) {
+        Write-Warn "写 ~/.ssh/config 跳过: ACL 解锁失败"
+        return $false
+    }
     try {
         [System.IO.File]::WriteAllText($script:SshCfg, $Content, [System.Text.UTF8Encoding]::new($false))
-    } catch {
+        return $true
+    }
+    catch {
         Write-Warn "写 ~/.ssh/config 失败: $($_.Exception.Message)"
+        return $false
     }
 }
 
@@ -745,8 +798,13 @@ function Invoke-PreCheck {
     Write-Info "  痕迹:"
     $oldFrp = 'C:\Tools\frp'
     Write-Host ("    C:\Tools\frp (老): $(Tern (Test-Path $oldFrp) '⚠  存在,要清' '✅ 无')")
-    $cfgRaw = Read-SshConfig
-    Write-Host ("    ~/.ssh/config 段: $(Tern ($cfgRaw -match '# ===== ssh-deploy:') '⚠  存在,要清' '✅ 无')")
+    $cfgRead = Read-SshConfig
+    if (-not $cfgRead.ok) {
+        Write-Host "    ~/.ssh/config 段: ❌ 读失败 ($($cfgRead.status): $($cfgRead.err)) — 跳"
+    } else {
+        $cfgRaw = $cfgRead.content
+        Write-Host ("    ~/.ssh/config 段: $(Tern ($cfgRaw -match '# ===== ssh-deploy:') '⚠  存在,要清' '✅ 无')")
+    }
     $oldTask = Get-ScheduledTask 'frpc-autostart' -ErrorAction SilentlyContinue
     Write-Host ("    frpc-autostart (老任务): $(Tern $oldTask '⚠  存在,要清' '✅ 无')")
 
@@ -1156,22 +1214,39 @@ function Sync-SshConfigFromVps {
 
     # 写 ~/.ssh/config wpc-* 段
     if (-not (Test-Path $script:SshDir)) { New-Item -ItemType Directory -Path $script:SshDir -Force | Out-Null }
-    $cfgRaw = Read-SshConfig
+    $cfgRead = Read-SshConfig
+    if (-not $cfgRead.ok) {
+        Write-Warn "  读 ~/.ssh/config 失败 ($($cfgRead.status): $($cfgRead.err)) — 跳过 (防覆盖用户已有 Host)"
+        return @{ ok = $false; msg = 'config 读失败' }
+    }
+    $cfgRaw = $cfgRead.content
     $cfgRaw = [regex]::Replace($cfgRaw, $script:MarkerConfig, '')
 
-    $newBlock = "# ===== ssh-deploy: do not edit this block manually =====`n"
-    $newBlock += "Host *`n  ServerAliveInterval 30`n  ServerAliveCountMax 3`n  TCPKeepAlive yes`n`n"
+    # 校验每个 device 字段齐 (capabilities.sshd.user + .frpc.remote_port)
     foreach ($d in $devices) {
         $name = $d.device_name
+        if (-not $name) { Write-Warn "  跳过无 device_name 的设备"; continue }
         $usr = $d.capabilities.sshd.user
         $port = $d.capabilities.frpc.remote_port
+        if (-not $usr -or -not $port) {
+            Write-Warn "  跳过 $($name): sshd.user='$usr' frpc.remote_port='$port' 缺字段"
+            continue
+        }
         $newBlock += "Host wpc-$name`n  HostName $($script:State.VpsHost)`n  Port $port`n  User $usr`n  ServerAliveInterval 30`n  ServerAliveCountMax 3`n`n"
     }
+
     $newBlock += "# ===== END ssh-deploy =====`n`n"
     $cfgRaw = $newBlock + $cfgRaw
-    Write-SshConfig $cfgRaw
-    Write-Info "  ~/.ssh/config 写了 $($devices.Count) 个 wpc-* 段"
-    return @{ ok = $true; count = $devices.Count }
+    $written = Write-SshConfig $cfgRaw
+    if (-not $written) {
+        Write-Err "  写 ~/.ssh/config 失败 — 配置未更新" -Critical
+        return @{ ok = $false; msg = 'config 写失败' }
+    }
+    $count = ($devices | Where-Object {
+        $_.device_name -and $_.capabilities.sshd.user -and $_.capabilities.frpc.remote_port
+    }).Count
+    Write-Info "  ~/.ssh/config 写了 $count 个 wpc-* 段"
+    return @{ ok = $true; count = $count }
 }
 
 # ── Step C3: PowerShell alias wpc-* ──
@@ -1393,9 +1468,11 @@ function Invoke-Uninstall {
 
     # 5. 清 ~/.ssh/config ssh-deploy 段
     if (Test-Path $script:SshCfg) {
-        $raw = Read-SshConfig
-        $raw = [regex]::Replace($raw, $script:MarkerConfig, '')
-        Write-SshConfig $raw
+        $cfgRead = Read-SshConfig
+        if ($cfgRead.ok) {
+            $raw = [regex]::Replace($cfgRead.content, $script:MarkerConfig, '')
+            $null = Write-SshConfig $raw
+        }
     }
     # 6. 清 PROFILE alias 段
     if (Test-Path $script:ProfilePath) {
@@ -1513,7 +1590,10 @@ function Invoke-MenuLoop {
 
 # boot banner
 Write-Host "ssh-deploy v$($script:VERSION) ($script:CommitShort) starting..." -ForegroundColor DarkGray
-Write-Host "  VPS: $($script:State.VpsHost)  Mode: $($script:State.InstallMode)  Bearer: $($script:State.BearerToken.Substring(0, [Math]::Min(8, $script:State.BearerToken.Length)))..." -ForegroundColor DarkGray
+$bearerShort = if ($script:State.BearerToken -and $script:State.BearerToken.Length -gt 0) {
+    $script:State.BearerToken.Substring(0, [Math]::Min(8, $script:State.BearerToken.Length))
+} else { '(none)' }
+Write-Host "  VPS: $($script:State.VpsHost)  Mode: $($script:State.InstallMode)  Bearer: $bearerShort..." -ForegroundColor DarkGray
 
 # Tern 自检 — 抓老版本缓存 (param([bool]$C, ...)) 直接爆错
 try {
