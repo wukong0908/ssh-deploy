@@ -75,7 +75,7 @@ $script:startTime = Get-Date
 # ─────────────────────────────────────────────────────────────────────
 #region Module 0 — Constants + Logging
 
-$script:VERSION = 'v3.16'
+$script:VERSION = 'v3.17'
 
 # CommitShort: 从 $PSScriptRoot/../.git/HEAD 读 (本地开发) 或 fallback 到 'unknown'
 # raw 拉 (无 .git) 时返 'unknown'
@@ -855,7 +855,7 @@ function Invoke-PreCheck {
     $devList = Get-VpsDeviceList
     if ($devList -and $devList.devices) {
         foreach ($d in $devList.devices) {
-            $status = if ($d.status) { $d.status } else { 'unknown' }
+            $status = if ($d.online) { 'online' } else { 'offline' }
             Write-Host "    [$status] $($d.device_name) port=$($d.capabilities.frpc.remote_port) user=$($d.capabilities.sshd.user)"
         }
     }
