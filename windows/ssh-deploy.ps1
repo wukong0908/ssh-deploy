@@ -75,7 +75,7 @@ $script:startTime = Get-Date
 # ─────────────────────────────────────────────────────────────────────
 #region Module 0 — Constants + Logging
 
-$script:VERSION = 'v3.15'
+$script:VERSION = 'v3.16'
 
 # CommitShort: 从 $PSScriptRoot/../.git/HEAD 读 (本地开发) 或 fallback 到 'unknown'
 # raw 拉 (无 .git) 时返 'unknown'
@@ -1342,6 +1342,22 @@ function Sync-VpsDevices {
     $devices = $list.devices
     if (-not $devices) { $devices = @() }
 
+    # 列出当前 VPS 设备清单 (主人 2026-08-04: 写之前先看)
+    Write-Host ""
+    Write-Info "  VPS 设备清单 ($($devices.Count) 条):"
+    if ($devices.Count -eq 0) {
+        Write-Host "    (无)" -ForegroundColor DarkGray
+    }
+    else {
+        foreach ($d in $devices) {
+            $name = $d.device_name
+            $usr = $d.capabilities.sshd.user
+            $port = $d.capabilities.frpc.remote_port
+            Write-Host ("    {0,-20} port={1,-5} user={2}" -f $name, $port, $usr)
+        }
+    }
+    Write-Host ""
+
     # 1. ~/.ssh/config wpc-* 段
     if (-not (Test-Path $script:SshDir)) { New-Item -ItemType Directory -Path $script:SshDir -Force | Out-Null }
     $cfgRead = Read-SshConfig
@@ -1689,7 +1705,7 @@ function Invoke-MenuLoop {
         $choice = Read-Host "选"
         switch ($choice) {
             '1' { Invoke-Install -Mode $script:State.InstallMode }
-            '2' { Sync-VpsDevices }
+            '2' { $null = Sync-VpsDevices }
             '3' { $null = Unregister-Host }
             '4' { Invoke-Uninstall }
             '0' { Write-Ok "bye"; return }
