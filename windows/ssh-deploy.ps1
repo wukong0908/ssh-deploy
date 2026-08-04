@@ -67,7 +67,7 @@ $script:startTime = Get-Date
 # ─────────────────────────────────────────────────────────────────────
 #region Module 0 — Constants + Logging
 
-$script:VERSION = 'v3.3'
+$script:VERSION = 'v3.4'
 
 # CommitShort: 从 $PSScriptRoot/../.git/HEAD 读 (本地开发) 或 fallback 到 'unknown'
 # raw 拉 (无 .git) 时返 'unknown'
@@ -965,7 +965,18 @@ function Install-OpenSSHServer {
          (绕开 install-sshd.ps1 — 该脚本会触发 '没有注册类' COM 错)
       5. cap=null + 都没 → 返错
     #>
-    $cap = Get-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 -ErrorAction SilentlyContinue
+    # Note: $ErrorActionPreference='Stop' 全局生效, Get-WindowsCapability 内部 COM 异常
+    #   会冒泡 (SilentlyContinue 不生效). 必须 try/catch 兜 COMException.
+    $cap = $null
+    try {
+        $cap = Get-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 -ErrorAction Stop
+    } catch [System.Runtime.InteropServices.COMException] {
+        Write-Debug "  Get-WindowsCapability COM 异常 (DISM 走不动): $($_.Exception.Message)"
+        $cap = $null
+    } catch {
+        Write-Debug "  Get-WindowsCapability 异常: $($_.Exception.Message)"
+        $cap = $null
+    }
     $sshdExe = "$env:SystemRoot\System32\OpenSSH\sshd.exe"
 
     # 1. capability 报已装
