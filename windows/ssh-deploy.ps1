@@ -67,7 +67,7 @@ $script:startTime = Get-Date
 # ─────────────────────────────────────────────────────────────────────
 #region Module 0 — Constants + Logging
 
-$script:VERSION = 'v3.2'
+$script:VERSION = 'v3.3'
 
 # CommitShort: 从 $PSScriptRoot/../.git/HEAD 读 (本地开发) 或 fallback 到 'unknown'
 # raw 拉 (无 .git) 时返 'unknown'
@@ -936,7 +936,10 @@ function Invoke-Install {
         }
         catch {
             $script:State.Elapsed[$step.Code] = ((Get-Date) - $stepStart).TotalSeconds
-            Write-Err "$($step.Code) 抛错: $($_.Exception.Message)" -Critical:$step.Critical
+            $msg = "$($step.Code) 抛错: $($_.Exception.Message) [$($_.Exception.GetType().FullName)]"
+            Write-Err $msg -Critical:$step.Critical
+            Write-Host "  堆栈: $($_.ScriptStackTrace)" -ForegroundColor DarkGray
+            Write-Host "  位置: $($_.InvocationInfo.PositionMessage)" -ForegroundColor DarkGray
             if ($step.Critical) {
                 return @{ ok = $false; failed = $step.Code; detail = $_.Exception.Message }
             }
