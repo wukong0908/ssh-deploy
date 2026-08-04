@@ -75,7 +75,7 @@ $script:startTime = Get-Date
 # ─────────────────────────────────────────────────────────────────────
 #region Module 0 — Constants + Logging
 
-$script:VERSION = 'v3.19'
+$script:VERSION = 'v3.20'
 
 # CommitShort: 从 $PSScriptRoot/../.git/HEAD 读 (本地开发) 或 fallback 到 'unknown'
 # raw 拉 (无 .git) 时返 'unknown'
@@ -1091,12 +1091,23 @@ function Add-FirewallRule22 {
 function Install-Frpc {
     $health = Test-FrpcHealth
 
-    # 4 态: 都 OK → 跳
+    # 4 态: 都 OK → 但仍校验 toml remotePort 是否跟 state 一致 (主人 2026-08-04: 否则 prompt 改了 port toml 不更新)
+    $needRestart = $false
     if ($health.Task -and $health.Exe -and $health.Toml -and $health.Process) {
-        Write-Info "  frpc 健康 (task+exe+toml+进程), 跳过"
-        return @{ ok = $true }
+        $tomlPath = Join-Path $script:FrpcInstallDir 'frpc.toml'
+        $tomlRaw = Get-Content $tomlPath -Raw -ErrorAction SilentlyContinue
+        $portInToml = if ($tomlRaw -and ($tomlRaw -match '(?m)remotePort\s*=\s*(\d+)')) { [int]$Matches[1] } else { 0 }
+        if ($portInToml -eq $script:State.FrpcPort) {
+            Write-Info "  frpc 健康 (task+exe+toml+进程) + toml port=$portInToml 跟 state 一致, 跳过"
+            return @{ ok = $true }
+        }
+        Write-Warn "  frpc toml port=$portInToml 跟 state FrpcPort=$($script:State.FrpcPort) 不一致, 重写 + 重启"
+        $needRestart = $true
+        # 不 return, 继续往下
     }
-    Write-Warn "  frpc 不健康: task=$($health.Task) exe=$($health.Exe) toml=$($health.Toml) 进程=$($health.Process)"
+    else {
+        Write-Warn "  frpc 不健康: task=$($health.Task) exe=$($health.Exe) toml=$($health.Toml) 进程=$($health.Process)"
+    }
 
     # 杀残留
     if ($health.Process) {
