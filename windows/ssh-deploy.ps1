@@ -75,7 +75,7 @@ $script:startTime = Get-Date
 # ─────────────────────────────────────────────────────────────────────
 #region Module 0 — Constants + Logging
 
-$script:VERSION = 'v3.14'
+$script:VERSION = 'v3.15'
 
 # CommitShort: 从 $PSScriptRoot/../.git/HEAD 读 (本地开发) 或 fallback 到 'unknown'
 # raw 拉 (无 .git) 时返 'unknown'
@@ -1482,6 +1482,16 @@ function Register-ThisHost {
 
     # 查冲突 (主人 2026-08-04: device_name 覆盖静默, remote_port 冲突 prompt 确认)
     $force = $false
+
+    # 注册前确认 frp remote port (默认 6000, 直回车接受)
+    $defaultPort = $script:State.FrpcPort
+    $inputPort = Read-Host "  frp remote port (默认 $defaultPort,直回车接受)"
+    $parsedPort = 0
+    if ($inputPort -and [int]::TryParse($inputPort, [ref]$parsedPort) -and $parsedPort -gt 0 -and $parsedPort -lt 65536) {
+        $script:State.FrpcPort = $parsedPort
+        Write-Info "  frp port 改为: $($script:State.FrpcPort)"
+    }
+
     $list = Invoke-VpsApi -Method GET -Path '/device/list'
     if ($list -and $list.devices) {
         # 同 device_name (server 自动覆盖, 仅 INFO)
