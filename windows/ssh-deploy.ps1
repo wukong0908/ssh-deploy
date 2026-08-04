@@ -71,7 +71,7 @@ $script:startTime = Get-Date
 # ─────────────────────────────────────────────────────────────────────
 #region Module 0 — Constants + Logging
 
-$script:VERSION = 'v3.9'
+$script:VERSION = 'v3.10'
 
 # CommitShort: 从 $PSScriptRoot/../.git/HEAD 读 (本地开发) 或 fallback 到 'unknown'
 # raw 拉 (无 .git) 时返 'unknown'
@@ -1477,6 +1477,14 @@ function Register-ThisHost {
     <#
     POST /device/register. 替 v2 2 个 Register (Install 自动 + Register-DeviceToVPS).
     #>
+    # 注册前确认 host 名 (默认 ServerName, 直回车接受)
+    $defaultName = $script:State.ServerName
+    $input = Read-Host "  host 名 (默认 $defaultName,直回车接受)"
+    if ($input) {
+        $script:State.ServerName = $input.ToLower().Trim()
+        Write-Info "  host 名改为: $($script:State.ServerName)"
+    }
+
     $deviceId = Get-DeviceIdLocal
     # VPS _safe_device_id regex = [A-Za-z0-9._:-]{1,128}
     # 旧 config.xml 可能多 device id 残留 / 拼字符串, 必须单值合法
@@ -1594,25 +1602,20 @@ function Invoke-Uninstall {
         }
     }
 
-    # 2. 杀 frpc + 删任务
-    Write-Info "  杀 frpc..."
+    # 2. 杀 frpc + 删任务 (文件保留, 主人 2026-08-04 要求)
+    Write-Info "  杀 frpc + 删 frpc-bg 任务..."
     Get-Process -Name frpc -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     $task = Get-ScheduledTask 'frpc-bg' -ErrorAction SilentlyContinue
     if ($task) { Unregister-ScheduledTask -TaskName 'frpc-bg' -Confirm:$false }
     $oldTask = Get-ScheduledTask 'frpc-autostart' -ErrorAction SilentlyContinue
     if ($oldTask) { Unregister-ScheduledTask -TaskName 'frpc-autostart' -Confirm:$false }
+    Write-Info "  C:\frp\ 保留 (主人手动用)"
 
-    # 3. 删 frpc 文件
-    if (Test-Path $script:FrpcInstallDir) {
-        Remove-Item $script:FrpcInstallDir -Recurse -Force -ErrorAction SilentlyContinue
-        Write-Info "  删 $script:FrpcInstallDir"
-    }
-
-    # 4. 停 sshd
+    # 3. 停 sshd
     Stop-Service sshd -Force -ErrorAction SilentlyContinue
     Set-Service sshd -StartupType Disabled -ErrorAction SilentlyContinue
 
-    # 5. 清 ~/.ssh/config ssh-deploy 段
+    # 4. 清 ~/.ssh/config ssh-deploy 段
     if (Test-Path $script:SshCfg) {
         $cfgRead = Read-SshConfig
         if ($cfgRead.ok) {
@@ -1620,14 +1623,14 @@ function Invoke-Uninstall {
             $null = Write-SshConfig $raw
         }
     }
-    # 6. 清 PROFILE alias 段
+    # 5. 清 PROFILE alias 段
     if (Test-Path $script:ProfilePath) {
         $raw = Get-Content $script:ProfilePath -Raw
         $raw = [regex]::Replace($raw, $script:MarkerAlias, '')
         [System.IO.File]::WriteAllText($script:ProfilePath, $raw, [System.Text.UTF8Encoding]::new($false))
     }
 
-    # 7. 删 plan 任务
+    # 6. 删 poller 任务
     $poller = Get-ScheduledTask 'ssh-deploy-poller' -ErrorAction SilentlyContinue
     if ($poller) { Unregister-ScheduledTask -TaskName 'ssh-deploy-poller' -Confirm:$false }
 
