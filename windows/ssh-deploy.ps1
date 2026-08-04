@@ -67,7 +67,7 @@ $script:startTime = Get-Date
 # ─────────────────────────────────────────────────────────────────────
 #region Module 0 — Constants + Logging
 
-$script:VERSION = 'v3.0'
+$script:VERSION = 'v3.1'
 
 # CommitShort: 从 $PSScriptRoot/../.git/HEAD 读 (本地开发) 或 fallback 到 'unknown'
 # raw 拉 (无 .git) 时返 'unknown'
@@ -951,45 +951,93 @@ function Invoke-Install {
 
 # ── Step S1: OpenSSH Server ──
 function Install-OpenSSHServer {
+    <#
+    5 态判定:
+      1. cap.State=Installed → 跳
+      2. cap 返值未装 → Add-WindowsCapability 装
+      3. cap=null + sshd 服务已装 → 跳 (DISM 走不动但 sshd 在)
+      4. cap=null + sshd 未装 + zip 在 → 离线 xcopy + sc create + ssh-keygen -A
+         (绕开 install-sshd.ps1 — 该脚本会触发 '没有注册类' COM 错)
+      5. cap=null + 都没 → 返错
+    #>
     $cap = Get-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 -ErrorAction SilentlyContinue
-    $installed = $false
+    $sshdExe = "$env:SystemRoot\System32\OpenSSH\sshd.exe"
+
+    # 1. capability 报已装
     if ($cap -and $cap.State -eq 'Installed') {
-        Write-Info "  OpenSSH Server 已装, 跳过"
-        $installed = $true
+        Write-Info "  OpenSSH Server 已装 (capability), 跳过"
     }
+    # 3. capability 拿不到但 sshd 服务在
+    elseif ($null -eq $cap -and (Get-Service sshd -ErrorAction SilentlyContinue)) {
+        Write-Info "  OpenSSH Server 检测不到 capability 但 sshd 服务已存在 — 跳过"
+    }
+    # 5. 啥都没有
+    elseif ($null -eq $cap -and -not (Test-Path $sshdExe) -and -not (Get-Service sshd -ErrorAction SilentlyContinue)) {
+        Write-Warn "  capability 拿不到 + sshd 未装 — 试 zip 离线装"
+        $workDir = Join-Path $env:TEMP 'ssh-deploy-openssh'
+        $zip = Get-OpenSSHZip -WorkDir $workDir
+        if (-not $zip) {
+            return @{ ok = $false; msg = 'capability 不可用 + zip 离线包拿不到' }
+        }
+        $expanded = Expand-OpenSSHZip -ZipPath $zip.path -ExpandRoot $workDir
+        $dest = "$env:SystemRoot\System32\OpenSSH"
+        if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest -Force | Out-Null }
+        # 直接 xcopy binaries (绕开 install-sshd.ps1)
+        try {
+            Copy-Item "$expanded\*" "$dest\" -Recurse -Force -ErrorAction Stop
+            Write-Info "  OpenSSH binaries 已复制到 $dest"
+        } catch {
+            return @{ ok = $false; msg = "binaries 复制失败: $($_.Exception.Message)" }
+        }
+        # ssh-keygen -A 生成 host keys
+        try {
+            & "$dest\ssh-keygen.exe" -A 2>&1 | Out-Null
+        } catch {
+            Write-Warn "  ssh-keygen -A 失败 (host keys 可能未生成): $($_.Exception.Message)"
+        }
+        # sc create sshd
+        try {
+            $scOut = sc.exe create sshd binPath= "`"$dest\sshd.exe`"" DisplayName= "OpenSSH SSH Server" start= auto 2>&1
+            Write-Info "  sc create sshd: $scOut"
+        } catch {
+            Write-Warn "  sc create sshd 失败: $($_.Exception.Message)"
+        }
+        # ProgramData\ssh 目录 + 默认 sshd_config
+        if (-not (Test-Path 'C:\ProgramData\ssh')) {
+            New-Item -ItemType Directory -Path 'C:\ProgramData\ssh' -Force | Out-Null
+        }
+        if ((Test-Path "$expanded\sshd_config_default") -and -not (Test-Path 'C:\ProgramData\ssh\sshd_config')) {
+            Copy-Item "$expanded\sshd_config_default" 'C:\ProgramData\ssh\sshd_config' -Force
+        }
+    }
+    # 2. capability 返值未装 — Add-WindowsCapability
     elseif ($cap) {
         try {
             Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 -ErrorAction Stop | Out-Null
+            Write-Info "  OpenSSH Server 已通过 DISM 装"
         }
         catch {
-            Write-Warn "  Add-WindowsCapability 失败: $($_.Exception.Message) — 试离线包"
-            $workDir = Join-Path $env:TEMP 'ssh-deploy-openssh'
-            $zip = Get-OpenSSHZip -WorkDir $workDir
-            if (-not $zip) {
-                return @{ ok = $false; msg = '离线包也拿不到' }
-            }
-            $expanded = Expand-OpenSSHZip -ZipPath $zip.path -ExpandRoot $workDir
-            # 走 Setup 脚本
-            try {
-                & "$expanded\install-sshd.ps1" 2>&1 | Out-Null
-            } catch {
-                Write-Warn "  install-sshd.ps1 抛错: $($_.Exception.Message) — 假设离线包脚本可能触发 COM 注册问题; 假定 sshd 已装继续"
-            }
+            Write-Warn "  Add-WindowsCapability 失败: $($_.Exception.Message)"
+            return @{ ok = $false; msg = 'DISM 装失败' }
         }
+    }
+    # 兜底:上面漏了的情况 — 当已装 (sshd.exe 在)
+    elseif (Test-Path $sshdExe) {
+        Write-Info "  OpenSSH binaries 已在 $sshdExe — 跳过"
     }
     else {
-        # $cap = $null → DISM 走不动 (servicing stack / 权限); 但 sshd 服务可能已装
-        $existing = Get-Service sshd -ErrorAction SilentlyContinue
-        if ($existing) {
-            Write-Info "  OpenSSH Server 检测不到 capability 但 sshd 服务存在 — 跳过"
-            $installed = $true
-        } else {
-            return @{ ok = $false; msg = 'DISM 走不动且 sshd 未装; 检查 Win11 servicing stack' }
-        }
+        return @{ ok = $false; msg = 'OpenSSH Server 装不上 (capability/binaries 都不可用)' }
     }
+
+    # 启动 + 设自启 (succeed 路径统一)
     Set-Service sshd -StartupType Automatic -ErrorAction SilentlyContinue
     Start-Service sshd -ErrorAction SilentlyContinue
-    Write-Info "  sshd 服务: $(Get-Service sshd -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Status)"
+    $svc = Get-Service sshd -ErrorAction SilentlyContinue
+    $status = if ($svc) { $svc.Status } else { 'not installed' }
+    Write-Info "  sshd 服务: $status"
+    if ($status -eq 'not installed') {
+        return @{ ok = $false; msg = 'sshd 服务未注册; 装失败' }
+    }
     return @{ ok = $true }
 }
 
