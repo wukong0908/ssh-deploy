@@ -15,7 +15,7 @@
       - 单一源: 1 个 Invoke-VpsApi / 1 个 Get-DeviceIdLocal / 1 个 ssh-config marker
 
     主菜单:
-      [1] PreCheck             — 7 节体检报告
+      [1] PreCheck             — 6 节体检报告
       [2] Install              — 默认 mode=both(server+client)
       [3] VPS 状态 + 同步       — 拉 device list → 重写 ~/.ssh/config + PowerShell alias
       [4] Register 本机到 VPS  — POST /device/register
@@ -740,23 +740,6 @@ function Test-FrpcHealth {
     }
 }
 
-function Test-ReverseSshTunnel {
-    <#
-    3s ssh smoke. PreCheck 用.
-    .OUTPUTS
-        [bool] $true = 通
-    #>
-    param([string]$HostAlias)
-    if (-not $HostAlias) { return $false }
-    try {
-        $out = ssh -o BatchMode=yes -o ConnectTimeout=3 -o StrictHostKeyChecking=no $HostAlias 'echo SSH_TUNNEL_OK' 2>&1
-        return ($LASTEXITCODE -eq 0 -and ($out -join ' ') -match 'SSH_TUNNEL_OK')
-    }
-    catch {
-        return $false
-    }
-}
-
 function Get-VpsDeviceList {
     <#
     返 devices list (含 fallback Bearer 解析). 走 Module 3.
@@ -770,7 +753,7 @@ function Get-VpsDeviceList {
 
 function Invoke-PreCheck {
     <#
-    7 节 PreCheck 报告: 管理员 / OS / 账号 / 网络 / 环境 / 端口 / e2e smoke
+    6 节 PreCheck 报告: 管理员 / OS / 账号 / 网络 / 环境 / 端口
     pure read, 不改任何东西.
     #>
     Write-Info "========== PreCheck =========="
@@ -867,38 +850,13 @@ function Invoke-PreCheck {
     $oldTask = Get-ScheduledTask 'frpc-autostart' -ErrorAction SilentlyContinue
     Write-Host ("    frpc-autostart (老任务): $(Tern $oldTask '⚠  存在,要清' '✅ 无')")
 
-    # 7. 端到端 smoke
-    Write-Host ""
-    Write-Info "  端到端 SSH smoke:"
-    $first = $null
-    $cfgSafe = if ($cfgRaw) { $cfgRaw } else { '' }
-    foreach ($m in [regex]::Matches($cfgSafe, 'Host\s+(wpc-[\w-]+)')) {
-        $first = $m.Groups[1].Value
-        break
-    }
-    if ($first) {
-        $ok = Test-ReverseSshTunnel -HostAlias $first
-        if ($ok) {
-            Write-Host "    ssh ${first}: ✅ 通 (反向 SSH 链路活)"
-        }
-        else {
-            Write-Host "    ssh ${first}: ❌ 失败"
-            Write-Host "      常见: frpc 死 / frpc-bg 没起 / VPS 端口 6000 not LISTEN / 阿里云 SG 没放"
-        }
-    }
-    else {
-        Write-Host "    (无 wpc-* Host,跳)"
-    }
-
-    # 8. 致命错误快照
+    # 7. 致命错误快照
     if ($script:State.LastError) {
         Write-Host ""
         Write-Host "  ⚠ 上次错误: $($script:State.LastError) (at $($script:State.LastErrorAt))"
     }
     Write-Host "=========================================" -ForegroundColor Cyan
 }
-
-#endregion
 
 # ─────────────────────────────────────────────────────────────────────
 # Module 2 — Install (表驱动, S1-S5 + C1-C3)
