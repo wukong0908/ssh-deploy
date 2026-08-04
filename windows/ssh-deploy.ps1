@@ -75,7 +75,7 @@ $script:startTime = Get-Date
 # ─────────────────────────────────────────────────────────────────────
 #region Module 0 — Constants + Logging
 
-$script:VERSION = 'v3.22'
+$script:VERSION = 'v3.26'
 
 # CommitShort: 从 $PSScriptRoot/../.git/HEAD 读 (本地开发) 或 fallback 到 'unknown'
 # raw 拉 (无 .git) 时返 'unknown'
@@ -123,6 +123,24 @@ $script:MarkerConfig = "(?ms)# ===== ssh-deploy:.*?# ===== END ssh-deploy =====\
 $script:MarkerAlias = "(?ms)# ===== ssh-deploy aliases =====.*?# ===== END ssh-deploy aliases =====\r?\n?"
 
 # ── Logging 分级 ──
+function Read-HostTrim {
+    <#
+    主人 2026-08-04: 粘贴时 PSReadLine 常自动加双引号, prompt 必须容错
+    去: 首尾空白 / 一对双引号 / 一对单引号
+    #>
+    param([Parameter(Mandatory, Position = 0)] [string]$Prompt)
+    $raw = Read-Host $Prompt
+    if (-not $raw) { return $raw }
+    $v = $raw.Trim()
+    if ($v.Length -ge 2) {
+        $first = $v[0]; $last = $v[$v.Length - 1]
+        if (($first -eq '"' -and $last -eq '"') -or ($first -eq "'" -and $last -eq "'")) {
+            $v = $v.Substring(1, $v.Length - 2).Trim()
+        }
+    }
+    return $v
+}
+
 function Write-Info {
     param([Parameter(Mandatory, Position = 0)] [string]$Msg)
     Write-Host "[INFO] $Msg" -ForegroundColor Cyan
@@ -447,7 +465,7 @@ function Resolve-TokenFile {
     }
     else {
         Write-Warn "未找到默认 token 文档 ($script:SecretsFile)"
-        $provided = Read-Host "请提供密钥文档完整路径"
+        $provided = Read-HostTrim "请提供密钥文档完整路径"
         if (-not $provided) {
             Write-Err "未提供 token 文档,退出" -Critical
             return $false
@@ -1513,7 +1531,7 @@ function Register-ThisHost {
         }
         if ($portOwner) {
             Write-Warn "  端口 $($script:State.FrpcPort) 已被 '$($portOwner.device_name)' 占用"
-            $ans = Read-Host "  覆盖占用方? (yes/no)"
+            $ans = Read-HostTrim "  覆盖占用方? (yes/no)"
             if ($ans -ne 'yes') {
                 Write-Info "  取消 — 改 frp port 或先 Unregister 占用方"
                 return @{ ok = $false; msg = 'port conflict, cancelled' }
@@ -1562,21 +1580,21 @@ function Unregister-Host {
         $d = $list.devices[$i]
         Write-Host "    [$($i+1)] $($d.device_name) (port $($d.capabilities.frpc.remote_port))"
     }
-    $pick = Read-Host "  选 [1-$($list.devices.Count)] 或 0 取消"
+    $pick = Read-HostTrim "  选 [1-$($list.devices.Count)] 或 0 取消"
     $idx = 0
     if (-not [int]::TryParse($pick, [ref]$idx) -or $idx -lt 1 -or $idx -gt $list.devices.Count) {
         Write-Info "  取消"
         return @{ ok = $false }
     }
     $target = $list.devices[$idx - 1]
-    $confirm = Read-Host "  确认注销 $($target.device_name)? (yes/no)"
+    $confirm = Read-HostTrim "  确认注销 $($target.device_name)? (yes/no)"
     if ($confirm -ne 'yes') { Write-Info "  取消"; return @{ ok = $false } }
 
     # auth_token (VPS device-registry 要求). 优先 list 返回;否则 prompt.
     $authToken = $target.auth_token
     if (-not $authToken) {
         Write-Warn "  list 没返回 auth_token — 需要手动输入"
-        $authToken = Read-Host "  paste auth_token"
+        $authToken = Read-HostTrim "  paste auth_token"
         if (-not $authToken) {
             Write-Err "  没 auth_token, 无法注销"
             return @{ ok = $false }
@@ -1606,14 +1624,26 @@ function Unregister-Host {
 #region Module 6 — Uninstall
 
 function Invoke-Uninstall {
-    $confirm = Read-Host "卸载会停 sshd / 杀 frpc / 清 .ssh/config 段 / 注销 VPS. 确认 yes?"
+    <#
+    主人 2026-08-04: 彻底清理所有相关文件夹, 每步都打 INFO
+    - 注销 VPS
+    - 杀 frpc + 删 frpc-bg / frpc-autostart 任务 + 删 C:\frp\
+    - 停 sshd 服务 + 设 disabled
+    - 还原 sshd_config (删 S2 加的三行)
+    - 删防火墙 :22 规则
+    - 清 ssh config ssh-deploy 段
+    - 清 PROFILE alias 段
+    - 删 secrets file (~/.ssh/deploy-secrets.md)
+    - 删 Defender 排除 C:\frp\
+    - 删 poller 任务
+    #>
+    $confirm = Read-HostTrim "卸载会停 sshd / 杀 frpc / 删 C:\frp\ / 还原 sshd_config / 删防火墙规则 / 清 .ssh/config + secrets / 注销 VPS. 确认 yes?"
     if ($confirm -ne 'yes') { Write-Info "取消"; return }
 
-    # 1. 注销 VPS (从 list 取 auth_token; 本机 device_id 用 Get-DeviceIdLocal)
-    Write-Info "  注销 VPS..."
+    # 1. 注销 VPS
+    Write-Info "  [1] 注销 VPS..."
     $deviceId = Get-DeviceIdLocal
     if ($deviceId) {
-        # 从 VPS 列表找本机 auth_token
         $authToken = $null
         $list = Invoke-VpsApi -Method GET -Path '/device/list'
         if ($list -and $list.devices) {
@@ -1630,40 +1660,134 @@ function Invoke-Uninstall {
         else {
             $body = @{ device_id = $deviceId }
             $null = Invoke-VpsApi -Method POST -Path '/device/deregister' -Body $body -DeviceToken $authToken
+            Write-Info "  已注销 VPS (device_id=$deviceId)"
         }
     }
+    else {
+        Write-Warn "  本机无 device_id (Syncthing 未装?), 跳过 VPS 注销"
+    }
 
-    # 2. 杀 frpc + 删任务 (文件保留, 主人 2026-08-04 要求)
-    Write-Info "  杀 frpc + 删 frpc-bg 任务..."
-    Get-Process -Name frpc -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    # 2. 杀 frpc + 删任务 + 删 C:\frp\
+    Write-Info "  [2] 杀 frpc + 删任务 + 删 C:\frp\..."
+    $frpcProcs = Get-Process -Name frpc -ErrorAction SilentlyContinue
+    if ($frpcProcs) {
+        $frpcProcs | Stop-Process -Force -ErrorAction SilentlyContinue
+        Start-Sleep 1
+        Write-Info "  杀 frpc 进程 (PID: $(($frpcProcs.Id -join ',')))"
+    }
     $task = Get-ScheduledTask 'frpc-bg' -ErrorAction SilentlyContinue
-    if ($task) { Unregister-ScheduledTask -TaskName 'frpc-bg' -Confirm:$false }
+    if ($task) {
+        Unregister-ScheduledTask -TaskName 'frpc-bg' -Confirm:$false
+        Write-Info "  删计划任务 frpc-bg"
+    }
     $oldTask = Get-ScheduledTask 'frpc-autostart' -ErrorAction SilentlyContinue
-    if ($oldTask) { Unregister-ScheduledTask -TaskName 'frpc-autostart' -Confirm:$false }
-    Write-Info "  C:\frp\ 保留 (主人手动用)"
+    if ($oldTask) {
+        Unregister-ScheduledTask -TaskName 'frpc-autostart' -Confirm:$false
+        Write-Info "  删老计划任务 frpc-autostart"
+    }
+    if (Test-Path $script:FrpcInstallDir) {
+        Remove-Item $script:FrpcInstallDir -Recurse -Force -ErrorAction Stop
+        Write-Info "  删目录 $($script:FrpcInstallDir)"
+    }
+    else {
+        Write-Info "  目录 $($script:FrpcInstallDir) 不存在, 跳过"
+    }
 
-    # 3. 停 sshd
-    Stop-Service sshd -Force -ErrorAction SilentlyContinue
-    Set-Service sshd -StartupType Disabled -ErrorAction SilentlyContinue
+    # 3. 停 sshd 服务
+    $sshdSvc = Get-Service sshd -ErrorAction SilentlyContinue
+    if ($sshdSvc) {
+        Stop-Service sshd -Force -ErrorAction SilentlyContinue
+        Set-Service sshd -StartupType Disabled -ErrorAction SilentlyContinue
+        Write-Info "  [3] 停 sshd 服务 (状态=$($sshdSvc.Status) → Disabled)"
+    }
 
-    # 4. 清 ~/.ssh/config ssh-deploy 段
+    # 4. 还原 sshd_config
+    Write-Info "  [4] 还原 sshd_config..."
+    $sshdCfg = "$env:ProgramData\ssh\sshd_config"
+    if (Test-Path $sshdCfg) {
+        try { Set-ItemProperty -Path $sshdCfg -Name IsReadOnly -Value $false -ErrorAction Stop } catch {}
+        $me = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+        try { icacls $sshdCfg /grant:r "${me}:(M)" 2>&1 | Out-Null } catch {}
+        $raw = Get-Content $sshdCfg -Raw
+        $raw = [regex]::Replace($raw, '(?m)^PasswordAuthentication\s+.*\r?\n', '')
+        $raw = [regex]::Replace($raw, '(?m)^PubkeyAuthentication\s+.*\r?\n', '')
+        $raw = [regex]::Replace($raw, '(?m)^PermitRootLogin\s+.*\r?\n', '')
+        [System.IO.File]::WriteAllText($sshdCfg, $raw, [System.Text.UTF8Encoding]::new($false))
+        Write-Info "  还原 sshd_config (删 S2 加的三行)"
+    }
+    else {
+        Write-Info "  sshd_config 不存在, 跳过"
+    }
+
+    # 5. 删防火墙 :22 规则
+    Write-Info "  [5] 删防火墙 :22 规则..."
+    $fwRule = Get-NetFirewallRule -DisplayName 'OpenSSH-Server-In-TCP' -ErrorAction SilentlyContinue
+    if ($fwRule) {
+        Remove-NetFirewallRule -DisplayName 'OpenSSH-Server-In-TCP' -ErrorAction SilentlyContinue
+        Write-Info "  删防火墙规则 OpenSSH-Server-In-TCP"
+    }
+    else {
+        Write-Info "  防火墙规则不存在, 跳过"
+    }
+
+    # 6. 清 ~/.ssh/config ssh-deploy 段
+    Write-Info "  [6] 清 ~/.ssh/config ssh-deploy 段..."
     if (Test-Path $script:SshCfg) {
         $cfgRead = Read-SshConfig
         if ($cfgRead.ok) {
             $raw = [regex]::Replace($cfgRead.content, $script:MarkerConfig, '')
             $null = Write-SshConfig $raw
+            Write-Info "  清 ssh-deploy 段 (marker 块)"
+        }
+        else {
+            Write-Warn "  读 ~/.ssh/config 失败 ($($cfgRead.status)), 跳过"
         }
     }
-    # 5. 清 PROFILE alias 段
+    else {
+        Write-Info "  ~/.ssh/config 不存在, 跳过"
+    }
+
+    # 7. 清 PROFILE alias 段
+    Write-Info "  [7] 清 PROFILE alias 段..."
     if (Test-Path $script:ProfilePath) {
         $raw = Get-Content $script:ProfilePath -Raw
         $raw = [regex]::Replace($raw, $script:MarkerAlias, '')
         [System.IO.File]::WriteAllText($script:ProfilePath, $raw, [System.Text.UTF8Encoding]::new($false))
+        Write-Info "  清 PROFILE ssh-deploy aliases 段"
+    }
+    else {
+        Write-Info "  PROFILE 不存在, 跳过"
     }
 
-    # 6. 删 poller 任务
+    # 8. 删 secrets file
+    Write-Info "  [8] 删 secrets file..."
+    if (Test-Path $script:SecretsFile) {
+        Remove-Item $script:SecretsFile -Force -ErrorAction Stop
+        Write-Info "  删 $($script:SecretsFile)"
+    }
+    else {
+        Write-Info "  secrets file 不存在, 跳过"
+    }
+
+    # 9. 删 Defender 排除
+    Write-Info "  [9] 删 Defender 排除..."
+    try {
+        Remove-MpPreference -ExclusionPath $script:FrpcInstallDir -ErrorAction Stop
+        Write-Info "  删 Defender 排除 $($script:FrpcInstallDir)"
+    } catch {
+        Write-Info "  Defender 排除不存在 / 删失败: $($_.Exception.Message)"
+    }
+
+    # 10. 删 poller 任务
+    Write-Info "  [10] 删 poller 任务..."
     $poller = Get-ScheduledTask 'ssh-deploy-poller' -ErrorAction SilentlyContinue
-    if ($poller) { Unregister-ScheduledTask -TaskName 'ssh-deploy-poller' -Confirm:$false }
+    if ($poller) {
+        Unregister-ScheduledTask -TaskName 'ssh-deploy-poller' -Confirm:$false
+        Write-Info "  删计划任务 ssh-deploy-poller"
+    }
+    else {
+        Write-Info "  poller 任务不存在, 跳过"
+    }
 
     Write-Ok "卸载完成"
 }
@@ -1697,12 +1821,12 @@ function Request-InstallParams {
     Write-Host "  === Install 前确认 ===" -ForegroundColor Cyan
     if (-not $ServerName) {
         $defaultName = $script:State.ServerName
-        $input = Read-Host "  host 名 (默认 $defaultName,直回车接受)"
+        $input = Read-HostTrim "  host 名 (默认 $defaultName,直回车接受)"
         if ($input) { $script:State.ServerName = $input.ToLower().Trim() }
     }
     if (-not $FrpSshPort) {
         $defaultPort = $script:State.FrpcPort
-        $inputPort = Read-Host "  frp remote port (默认 $defaultPort,直回车接受)"
+        $inputPort = Read-HostTrim "  frp remote port (默认 $defaultPort,直回车接受)"
         $parsedPort = 0
         if ($inputPort -and [int]::TryParse($inputPort, [ref]$parsedPort) -and $parsedPort -gt 0 -and $parsedPort -lt 65536) {
             $script:State.FrpcPort = $parsedPort
@@ -1714,7 +1838,7 @@ function Request-InstallParams {
 function Invoke-MenuLoop {
     do {
         Show-Menu
-        $choice = Read-Host "选"
+        $choice = Read-HostTrim "选"
         switch ($choice) {
             '1' { Request-InstallParams; Invoke-Install -Mode $script:State.InstallMode }
             '2' { $null = Sync-VpsDevices }
